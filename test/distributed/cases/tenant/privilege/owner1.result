@@ -12,7 +12,7 @@ role_id    role_name
 2    accountadmin
 1    public
 3    role1
-3000001    role2
+4    role2
 set role role2;
 create table db1.t2(a int);
 set secondary role all;
