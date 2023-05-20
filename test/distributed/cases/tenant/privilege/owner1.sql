@@ -12,7 +12,7 @@ create role role2;
 grant create table on database db1 to role2;
 create user user2 identified by '123456';
 grant role1,role2 to user2;
-select role_id, role_name from mo_role;
+select role_id, role_name from mo_catalog.mo_role;
 -- @session
 -- @session:id=4&user=default_1:user2&password=123456
 set role role2;
