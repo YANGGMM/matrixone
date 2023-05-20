@@ -2820,6 +2820,8 @@ func doSetSecondaryRoleAll(ctx context.Context, ses *Session) error {
 	account.SetDefaultRoleID(uint32(roleId))
 	account.SetDefaultRole(roleName)
 
+	return err
+
 handleFailed:
 	//ROLLBACK the transaction
 	rbErr := bh.Exec(ctx, "rollback;")
@@ -8411,7 +8413,7 @@ func doGrantPrivilegeImplicitly(ctx context.Context, ses *Session, stmt tree.Sta
 	bh := ses.GetBackgroundExec(tenantCtx)
 	defer bh.Close()
 
-	err = bh.Exec(ctx, sql)
+	err = bh.Exec(tenantCtx, sql)
 	if err != nil {
 		return err
 	}
