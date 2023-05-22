@@ -101,7 +101,7 @@ select * from sys_tbl_1;
 
 -- 恢复acc0 订阅权限
 alter publication sys_pub_1 account add acc0;
-
+select pub_name, database_name, account_list from mo_catalog.mo_pubs;
 -- acc0 订阅
 -- @session:id=2&user=acc0:root&password=111
 show subscriptions;
