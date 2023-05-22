@@ -175,6 +175,8 @@ a
 3
 alter publication sys_pub_1 account add acc0;
 select pub_name, database_name, account_list from mo_catalog.mo_pubs;
+pub_name    database_name    account_list
+sys_pub_1    sys_db_1    acc0,acc1
 show subscriptions;
 Name    From_Account
 sub1    sys
