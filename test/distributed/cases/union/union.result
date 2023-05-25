@@ -1,6 +1,4 @@
-drop database if exists transaction_enhance1;
-create database transaction_enhance1;
-use transaction_enhance1;
+commit;
 drop table if exists t1;
 drop table if exists t2;
 create table t1(a int, b int);
