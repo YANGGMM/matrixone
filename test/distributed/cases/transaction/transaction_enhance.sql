@@ -155,3 +155,45 @@ select * from atomic_table_13;
 -- @session
 rollback ;
 show create table atomic_table_13;
+
+drop table if exists atomic_table_12_5;
+drop table if exists atomic_table_13;
+create table atomic_table_12_5(c1 int,c2 varchar(25));
+insert into atomic_table_12_5 values (3,"a"),(4,"b"),(5,"c");
+alter table atomic_table_12_5 add index key1(c1);
+begin;
+alter table atomic_table_12_5 drop index key1;
+-- @session:id=2&user=sys:dump&password=111
+show create table atomic_table_12_5;
+select * from atomic_table_12_5;
+-- @session
+commit;
+show index from atomic_table_12_5;
+
+-- w-w conflict
+drop table if exists atomic_table_14;
+create table atomic_table_14(c1 int,c2 varchar(25));
+insert into atomic_table_14 values (3,"a"),(4,"b"),(5,"c");
+start transaction ;
+alter table atomic_table_14 add  index key1(c1);
+-- @session:id=2&user=sys:dump&password=111
+drop table atomic_table_14;
+-- @session
+-- @bvt:issue#9429
+insert into atomic_table_14 values (6,"a"),(7,"b");
+select * from atomic_table_14;
+-- @bvt:issue
+commit;
+select * from atomic_table_14;
+
+drop table if exists atomic_table_15;
+create table atomic_table_15(c1 int,c2 varchar(25));
+begin;
+insert into atomic_table_15 values (6,"a"),(7,"b");
+truncate table atomic_table_15;
+-- @session:id=2&user=sys:dump&password=111
+drop table atomic_table_15;
+-- @session
+select * from atomic_table_15;
+commit;
+select * from atomic_table_15;
