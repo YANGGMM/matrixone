@@ -171,3 +171,23 @@ commit;
 show create table atomic_table_13;
 Table    Create Table
 atomic_table_13    CREATE TABLE `atomic_table_13` (\n`c1` INT NOT NULL,\n`c2` VARCHAR(25) DEFAULT NULL,\nPRIMARY KEY (`c1`)\n)
+drop table if exists atomic_table_12_4;
+drop table if exists atomic_table_13;
+create table atomic_table_12_4(c1 int primary key,c2 varchar(25));
+insert into atomic_table_12_4 values (3,"a"),(4,"b"),(5,"c");
+create table atomic_table_13(c1 int primary key,c2 varchar(25));
+insert into atomic_table_13 values (3,"d"),(4,"e"),(5,"f");
+alter table atomic_table_13 add constraint ffa foreign key f_a(c1) references atomic_table_12_4(c1);
+begin;
+alter table atomic_table_13 drop foreign key ffa;
+insert into atomic_table_13 values (8,"h");
+internal error: Cannot add or update a child row: a foreign key constraint fails
+select * from atomic_table_13;
+c1    c2
+3    d
+4    e
+5    f
+rollback ;
+show create table atomic_table_13;
+Table    Create Table
+atomic_table_13    CREATE TABLE `atomic_table_13` (\n`c1` INT NOT NULL,\n`c2` VARCHAR(25) DEFAULT NULL,\nPRIMARY KEY (`c1`),\nCONSTRAINT `ffa` FOREIGN KEY (`c1`) REFERENCES `atomic_table_12_4` (`c1`) ON DELETE RESTRICT ON UPDATE RESTRICT\n)

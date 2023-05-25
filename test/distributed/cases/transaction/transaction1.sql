@@ -1,5 +1,3 @@
-create database transaction_enhance;
-use transaction_enhance;
 -- truncate table
 drop table if exists atomic_table_10;
 create table atomic_table_10(c1 int,c2 varchar(25));
@@ -40,6 +38,8 @@ select * from atomic_table_10;
 select * from atomic_table_10;
 commit;
 select * from atomic_table_10;
+
+-- drop table
 
 drop table if exists atomic_table_11;
 create table atomic_table_11(c1 int,c2 varchar(25));
@@ -138,4 +138,20 @@ insert into atomic_table_13 values (8,"h");
 select * from atomic_table_13;
 -- @session
 commit;
+show create table atomic_table_13;
+
+drop table if exists atomic_table_12_4;
+drop table if exists atomic_table_13;
+create table atomic_table_12_4(c1 int primary key,c2 varchar(25));
+insert into atomic_table_12_4 values (3,"a"),(4,"b"),(5,"c");
+create table atomic_table_13(c1 int primary key,c2 varchar(25));
+insert into atomic_table_13 values (3,"d"),(4,"e"),(5,"f");
+alter table atomic_table_13 add constraint ffa foreign key f_a(c1) references atomic_table_12_4(c1);
+begin;
+alter table atomic_table_13 drop foreign key ffa;
+-- @session:id=2&user=sys:dump&password=111
+insert into atomic_table_13 values (8,"h");
+select * from atomic_table_13;
+-- @session
+rollback ;
 show create table atomic_table_13;
