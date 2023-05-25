@@ -105,3 +105,37 @@ show create table atomic_table_12_1;
 rollback;
 show create table atomic_table_12_1;
 show index from atomic_table_12_1;
+
+use transaction_enhance;
+drop table if exists atomic_table_12_2;
+drop table if exists atomic_table_13;
+create table atomic_table_12_2(c1 int primary key,c2 varchar(25));
+insert into atomic_table_12_2 values (3,"a"),(4,"b"),(5,"c");
+create table atomic_table_13(c1 int primary key,c2 varchar(25));
+insert into atomic_table_13 values (3,"d"),(4,"e"),(5,"f");
+begin;
+alter table atomic_table_13 add constraint ffa foreign key f_a(c1) references atomic_table_12_2(c1);
+-- @session:id=2&user=sys:dump&password=111
+show create table atomic_table_12_2;
+insert into atomic_table_13 values (8,"h");
+select * from atomic_table_13;
+-- @session
+insert into atomic_table_13 values (6,"h");
+commit;
+show create table atomic_table_13;
+
+drop table if exists atomic_table_12_3;
+drop table if exists atomic_table_13;
+create table atomic_table_12_3(c1 int primary key,c2 varchar(25));
+insert into atomic_table_12_3 values (3,"a"),(4,"b"),(5,"c");
+create table atomic_table_13(c1 int primary key,c2 varchar(25));
+insert into atomic_table_13 values (3,"d"),(4,"e"),(5,"f");
+alter table atomic_table_13 add constraint ffa foreign key f_a(c1) references atomic_table_12_3(c1);
+begin;
+alter table atomic_table_13 drop foreign key ffa;
+-- @session:id=2&user=sys:dump&password=111
+insert into atomic_table_13 values (8,"h");
+select * from atomic_table_13;
+-- @session
+commit;
+show create table atomic_table_13;
