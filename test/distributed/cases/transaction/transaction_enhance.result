@@ -294,9 +294,9 @@ show create table atomic_table_18;
 Table    Create Table
 atomic_table_18    CREATE TABLE `atomic_table_18` (\n`c1` INT DEFAULT NULL,\n`c2` VARCHAR(25) DEFAULT NULL\n)
 rollback;
+set autocommit=1;
 show create table atomic_table_18;
 Table    Create Table
 atomic_table_18    CREATE TABLE `atomic_table_18` (\n`c1` INT DEFAULT NULL,\n`c2` VARCHAR(25) DEFAULT NULL\n)
 show index from atomic_table_18;
 Table    Non_unique    Key_name    Seq_in_index    Column_name    Collation    Cardinality    Sub_part    Packed    Null    Index_type    Comment    Index_comment    Visible    Expression
-set autocommit=1;
