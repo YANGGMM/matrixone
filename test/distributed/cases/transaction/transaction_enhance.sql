@@ -248,3 +248,4 @@ select count(*) from mo_catalog.mo_account where account_name='trans_acc1';
 -- @session
 commit;
 select count(*) from mo_catalog.mo_account where account_name='trans_acc1';
+drop account trans_acc1;
