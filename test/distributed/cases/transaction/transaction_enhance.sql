@@ -249,6 +249,7 @@ select count(*) from mo_catalog.mo_account where account_name='trans_acc1';
 commit;
 select count(*) from mo_catalog.mo_account where account_name='trans_acc1';
 drop account trans_acc1;
+
 -- autocommit
 drop table if exists atomic_table_18;
 create table atomic_table_18(c1 int,c2 varchar(25));
@@ -262,3 +263,4 @@ show create table atomic_table_18;
 rollback;
 show create table atomic_table_18;
 show index from atomic_table_18;
+set autocommit=1;
