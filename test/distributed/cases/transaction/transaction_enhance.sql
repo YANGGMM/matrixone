@@ -220,3 +220,31 @@ update atomic_table_17 set c1=8 where c2="b";
 -- @session
 commit;
 select * from atomic_table_17;
+
+-- create/drop database，sequence ,create/drop account
+start transaction ;
+create database tdb;
+-- @session:id=2&user=sys:dump&password=111
+use tdb;
+-- @session
+drop database tdb;
+commit;
+
+begin;
+create sequence seq_01 as int start 30;
+-- @session:id=2&user=sys:dump&password=111
+select nextval('seq_01');
+-- @session
+commit;
+select nextval('seq_01');
+
+drop table if exists atomic_table_11;
+drop account if exists trans_acc1;
+create account trans_acc1 admin_name "admin" identified by "111";
+begin;
+drop account trans_acc1;
+-- @session:id=2&user=trans_acc1:admin&password=111
+select count(*) from mo_catalog.mo_account where account_name='trans_acc1';
+-- @session
+commit;
+select count(*) from mo_catalog.mo_account where account_name='trans_acc1';
