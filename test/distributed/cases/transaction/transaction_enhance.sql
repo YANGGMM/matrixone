@@ -197,3 +197,26 @@ drop table atomic_table_15;
 select * from atomic_table_15;
 commit;
 select * from atomic_table_15;
+
+drop table if exists atomic_table_16;
+create table atomic_table_16(c1 int,c2 varchar(25));
+begin;
+insert into atomic_table_16 values (6,"a"),(7,"b");
+drop table atomic_table_16;
+-- @session:id=2&user=sys:dump&password=111
+drop table atomic_table_16;
+-- @session
+commit;
+select * from atomic_table_16;
+
+drop table if exists atomic_table_17;
+create table atomic_table_17(c1 int,c2 varchar(25));
+begin;
+insert into atomic_table_17 values (6,"a"),(7,"b");
+drop table atomic_table_17;
+-- @session:id=2&user=sys:dump&password=111
+alter table atomic_table_17 add constraint unique key (c1);
+update atomic_table_17 set c1=8 where c2="b";
+-- @session
+commit;
+select * from atomic_table_17;

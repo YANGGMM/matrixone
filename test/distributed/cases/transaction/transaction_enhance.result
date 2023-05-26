@@ -233,3 +233,24 @@ commit;
 internal error: w-w conflict: truncate error
 select * from atomic_table_15;
 SQL parser error: table "atomic_table_15" does not exist
+drop table if exists atomic_table_16;
+create table atomic_table_16(c1 int,c2 varchar(25));
+begin;
+insert into atomic_table_16 values (6,"a"),(7,"b");
+drop table atomic_table_16;
+drop table atomic_table_16;
+commit;
+w-w conflict
+select * from atomic_table_16;
+SQL parser error: table "atomic_table_16" does not exist
+drop table if exists atomic_table_17;
+create table atomic_table_17(c1 int,c2 varchar(25));
+begin;
+insert into atomic_table_17 values (6,"a"),(7,"b");
+drop table atomic_table_17;
+alter table atomic_table_17 add constraint unique key (c1);
+update atomic_table_17 set c1=8 where c2="b";
+commit;
+w-w conflict
+select * from atomic_table_17;
+c1    c2
