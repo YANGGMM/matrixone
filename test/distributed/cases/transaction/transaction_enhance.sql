@@ -261,6 +261,24 @@ alter table atomic_table_18 alter index key1 visible;
 show create table atomic_table_18;
 -- @session
 rollback;
-set autocommit=1;
 show create table atomic_table_18;
 show index from atomic_table_18;
+
+truncate table atomic_table_18;
+-- @session:id=2&user=sys:dump&password=111
+drop table atomic_table_18;
+-- @session
+select * from atomic_table_18;
+commit;
+select * from atomic_table_18;
+
+create table atomic_table_18(c1 int,c2 varchar(25));
+insert into atomic_table_18 values (6,"a"),(7,"b");
+drop table atomic_table_18;
+-- @session:id=2&user=sys:dump&password=111
+drop table atomic_table_18;
+-- @session
+select * from atomic_table_18;
+commit;
+set autocommit=1;
+select * from atomic_table_18;
