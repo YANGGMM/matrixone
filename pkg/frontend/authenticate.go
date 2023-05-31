@@ -5403,7 +5403,7 @@ func determineRoleSetHasPrivilegeSet(ctx context.Context, bh BackgroundExec, ses
 	var yes2 bool
 	//there is no privilege needs, just approve
 	if len(priv.entries) == 0 {
-		return false, nil
+		return true, nil
 	}
 
 	cache := ses.GetPrivilegeCache()
