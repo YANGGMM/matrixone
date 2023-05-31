@@ -20,13 +20,14 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"github.com/matrixorigin/matrixone/pkg/config"
 	"io"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/matrixorigin/matrixone/pkg/config"
 
 	"github.com/fagongzi/goetty/v2"
 	"github.com/google/uuid"
@@ -496,7 +497,7 @@ func (mce *MysqlCmdExecutor) handleSelectVariables(ve *tree.VarExpr, cwIndex, cw
 	row := make([]interface{}, 1)
 	if ve.System {
 		if ve.Global {
-			val, err := ses.GetGlobalVar(ve.Name)
+			val, err := doSelectGlobalSystemVariable(ses.GetRequestContext(), ses, ve.Name)
 			if err != nil {
 				return err
 			}

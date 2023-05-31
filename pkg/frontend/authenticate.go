@@ -1314,6 +1314,8 @@ const (
 
 	getSystemVariablesWithAccountFromat = `select variable_name, variable_value from mo_catalog.mo_mysql_compatibility_mode where account_id = %d and system_variables = true;`
 
+	getSystemVariableValueWithAccountFromat = `select variable_value from mo_catalog.mo_mysql_compatibility_mode where account_id = %d and variable_name = '%s' and system_variables = true;;`
+
 	updateSystemVariableValueFormat = `update mo_catalog.mo_mysql_compatibility_mode set variable_value = '%s' where account_id = %d and variable_name = '%s';`
 
 	updateConfigurationByDbNameAndAccountNameFormat = `update mo_catalog.mo_mysql_compatibility_mode set variable_value = '%s' where account_name = '%s' and dat_name = '%s' and variable_name = '%s';`
@@ -1729,6 +1731,10 @@ func getSqlForGetSystemVariableValueWithDatabase(dtname, variable_name string) s
 
 func getSystemVariablesWithAccount(accountId uint64) string {
 	return fmt.Sprintf(getSystemVariablesWithAccountFromat, accountId)
+}
+
+func getSqlForgetSystemVariableValueWithAccount(accountId uint64, varName string) string {
+	return fmt.Sprintf(getSystemVariableValueWithAccountFromat, accountId, varName)
 }
 
 func getSqlForUpdateSystemVariableValue(varValue string, accountId uint64, varName string) string {
@@ -8196,6 +8202,64 @@ func doGetGlobalSystemVariable(ctx context.Context, ses *Session) (ret map[strin
 	}
 
 	return sysVars, nil
+}
+
+// doSelectGlobalSystemVariable get the system vaiables value from the mo_mysql_compatibility_mode table
+func doSelectGlobalSystemVariable(ctx context.Context, ses *Session, varName string) (interface{}, error) {
+	var sql string
+	var err error
+	var erArray []ExecResult
+	var accountId uint32
+	var variableValue string
+	var val interface{}
+
+	// check the variable name isValid or not
+	_, err = ses.GetGlobalVar(varName)
+	if err != nil {
+		return nil, err
+	}
+
+	tenantInfo := ses.GetTenantInfo()
+	bh := ses.GetBackgroundExec(ctx)
+	defer bh.Close()
+
+	err = bh.Exec(ctx, "begin;")
+	defer func() {
+		err = finishTxn(ctx, bh, err)
+	}()
+	if err != nil {
+		return nil, err
+	}
+
+	accountId = tenantInfo.GetTenantID()
+	sql = getSqlForgetSystemVariableValueWithAccount(uint64(accountId), varName)
+
+	bh.ClearExecResultSet()
+	err = bh.Exec(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+
+	erArray, err = getResultSet(ctx, bh)
+	if err != nil {
+		return nil, err
+	}
+
+	if execResultArrayHasData(erArray) {
+		variableValue, err = erArray[0].GetString(ctx, 0, 0)
+		if err != nil {
+			return nil, err
+		}
+		if sv, ok := gSysVarsDefs[varName]; ok {
+			val, err = sv.GetType().ConvertFromString(variableValue)
+			if err != nil {
+				return nil, err
+			}
+			return val, nil
+		}
+	}
+
+	return nil, moerr.NewInternalError(ctx, "do not get global system variable")
 }
 
 func doSetGlobalSystemVariable(ctx context.Context, ses *Session, varName string, varValue interface{}) (err error) {
