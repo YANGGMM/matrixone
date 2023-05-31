@@ -7994,6 +7994,69 @@ func TestCheckSubscriptionValid(t *testing.T) {
 	}
 
 }
+func Test_doSelectGlobalSystemVariable(t *testing.T) {
+	convey.Convey("select global system variable fail", t, func() {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		bh := &backgroundExecTest{}
+		bh.init()
+
+		bhStub := gostub.StubFunc(&NewBackgroundHandler, bh)
+		defer bhStub.Reset()
+
+		stmt := &tree.ShowVariables{
+			Global: true,
+		}
+
+		priv := determinePrivilegeSetOfStatement(stmt)
+		ses := newSes(priv, ctrl)
+
+		//no result set
+		bh.sql2result["begin;"] = nil
+		bh.sql2result["commit;"] = nil
+		bh.sql2result["rollback;"] = nil
+
+		sql := getSqlForgetSystemVariableValueWithAccount(uint64(ses.GetTenantInfo().GetTenantID()), "autocommit")
+		mrs := newMrsForSqlForCheckUserHasRole([][]interface{}{})
+		bh.sql2result[sql] = mrs
+
+		_, err := doSelectGlobalSystemVariable(ses.GetRequestContext(), ses, "autocommit")
+		convey.So(err, convey.ShouldNotBeNil)
+	})
+
+	convey.Convey("select global system variable fail", t, func() {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		bh := &backgroundExecTest{}
+		bh.init()
+
+		bhStub := gostub.StubFunc(&NewBackgroundHandler, bh)
+		defer bhStub.Reset()
+
+		stmt := &tree.ShowVariables{
+			Global: true,
+		}
+
+		priv := determinePrivilegeSetOfStatement(stmt)
+		ses := newSes(priv, ctrl)
+
+		//no result set
+		bh.sql2result["begin;"] = nil
+		bh.sql2result["commit;"] = nil
+		bh.sql2result["rollback;"] = nil
+
+		sql := getSqlForgetSystemVariableValueWithAccount(uint64(ses.GetTenantInfo().GetTenantID()), "autocommit")
+		mrs := newMrsForSqlForCheckUserHasRole([][]interface{}{
+			{"1"},
+		})
+		bh.sql2result[sql] = mrs
+
+		_, err := doSelectGlobalSystemVariable(ses.GetRequestContext(), ses, "autocommit")
+		convey.So(err, convey.ShouldBeNil)
+	})
+}
 
 func TestDoCheckRole(t *testing.T) {
 	ctrl := gomock.NewController(t)
