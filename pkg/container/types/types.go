@@ -69,6 +69,7 @@ const (
 	T_uuid      T = 63
 	T_binary    T = 64
 	T_varbinary T = 65
+	T_enum      T = 66
 
 	// blobs
 	T_blob T = 70
@@ -105,6 +106,9 @@ type Type struct {
 	Width int32
 	// Scale means number of fractional digits for decimal, timestamp, float, etc.
 	Scale int32
+
+	// EnumValues means enum values
+	EnumValues []string
 }
 
 // ProtoSize is used by gogoproto.
@@ -174,6 +178,7 @@ type Time int64
 
 type Decimal64 uint64
 
+type Enum uint16
 type Decimal128 struct {
 	B0_63   uint64
 	B64_127 uint64
@@ -367,6 +372,7 @@ var Types map[string]T = map[string]T{
 	"transaction timestamp": T_TS,
 	"rowid":                 T_Rowid,
 	"blockid":               T_Blockid,
+	"enum":                  T_enum,
 }
 
 func New(oid T, width, scale int32) Type {
@@ -572,6 +578,9 @@ func (t T) ToType() Type {
 	case T_varbinary:
 		typ.Size = VarlenaSize
 		typ.Width = MaxVarBinaryLen
+	case T_enum:
+		typ.Size = 2
+		typ.Width = MaxEnumLen
 	case T_any:
 		// XXX I don't know about this one ...
 		typ.Size = 0
@@ -647,6 +656,8 @@ func (t T) String() string {
 		return "BLOCKID"
 	case T_interval:
 		return "INTERVAL"
+	case T_enum:
+		return "ENUM"
 	}
 	return fmt.Sprintf("unexpected type: %d", t)
 }
@@ -714,6 +725,8 @@ func (t T) OidString() string {
 		return "T_Blockid"
 	case T_interval:
 		return "T_interval"
+	case T_enum:
+		return "T_enum"
 	}
 	return "unknown_type"
 }
@@ -761,6 +774,8 @@ func (t T) TypeLen() int {
 		return BlockidSize
 	case T_tuple, T_interval:
 		return 0
+	case T_enum:
+		return 2
 	}
 	panic(fmt.Sprintf("unknown type %d", t))
 }
@@ -870,4 +885,24 @@ func (t T) IsDecimal() bool {
 		return true
 	}
 	return false
+}
+
+func (t Type) TypeEqual(o *Type) (equal bool) {
+	equal = t.Size == o.Size && t.Width == o.Width && t.Scale == o.Scale &&
+		t.Oid == o.Oid && t.Charset == o.Charset
+	if !equal {
+		return false
+	}
+	if t.EnumValues == nil && o.EnumValues == nil {
+		return true
+	}
+	if len(t.EnumValues) != len(o.EnumValues) {
+		return false
+	}
+	for i := range t.EnumValues {
+		if t.EnumValues[i] != o.EnumValues[i] {
+			return false
+		}
+	}
+	return
 }
