@@ -457,7 +457,7 @@ func (plt privilegeLevelType) String() string {
 	case privilegeLevelDatabaseStar:
 		return "d.*"
 	case privilegeLevelDatabaseTable:
-		return "d.t"
+		return "d.t.*"
 	case privilegeLevelTable:
 		return "t"
 	case privilegeLevelRoutine:
