@@ -1,0 +1,93 @@
+create account acc_idx ADMIN_NAME 'root' IDENTIFIED BY '123456';
+drop role if exists role_r1;
+drop user if exists role_u1;
+create role role_r1;
+create user role_u1 identified by '111' default role role_r1;
+create database test;
+use test;
+drop table if exists test01;
+create table test01(a int);
+insert into test01 values(1);
+insert into test01 values(2);
+create database abc;
+internal error: do not have privilege to execute the statement
+show databases like 'test';
+internal error: do not have privilege to execute the statement
+select * from test.test01;
+internal error: do not have privilege to execute the statement
+grant create database on account * to role_r1;
+grant show databases on account * to role_r1;
+grant connect on account * to role_r1;
+grant select on table * to role_r1;
+create database abc;
+show databases like 'test';
+Database
+test
+select * from test.test01;
+a
+1
+2
+revoke if exists show databases on account * from role_r1;
+revoke if exists select on table * from role_r1;
+revoke if exists create database  on account * from role_r1;
+show databases like 'test';
+internal error: do not have privilege to execute the statement
+select * from test.test01;
+internal error: do not have privilege to execute the statement
+create database abc1;
+internal error: do not have privilege to execute the statement
+show grants for 'role_u1'@"localhost";
+Grants for role_u1@localhost
+GRANT connect ON account  `role_u1`@`localhost`
+GRANT connect ON account  `role_u1`@`localhost`
+GRANT database ownership ON database d `role_u1`@`localhost`
+select role_name, privilege_name from mo_catalog.mo_role_privs where role_name = 'role_r1';
+role_name    privilege_name
+role_r1    connect
+role_r1    database ownership
+drop database test;
+drop user role_u1;
+drop role role_r1;
+create database db1;
+create role r1;
+grant create database on account * to r1;
+grant create table on database db1 to r1;
+grant insert on table db1.* to r1;
+grant select on table db1.* to r1;
+create user u1 identified by '111' default role r1;
+create database test;
+create table test.test01(a int);
+insert into test.test01 values(1);
+insert into test.test01 values(2);
+insert into test.test01 values(3);
+select * from test.test01;
+a
+1
+2
+3
+revoke if exists create database on account * from r1;
+revoke if exists create table on database db1 from r1;
+revoke if exists insert on table db1.* from r1;
+revoke if exists select on table db1.* from r1;
+create database revokeTest;
+create table test.test02(a int);
+insert into test.test01 values(4);
+select * from test.test01;
+a
+1
+2
+3
+4
+show grants for 'u1'@"localhost";
+Grants for u1@localhost
+GRANT connect ON account  `u1`@`localhost`
+GRANT database ownership ON database d `u1`@`localhost`
+GRANT table ownership ON table d.t `u1`@`localhost`
+select role_name, privilege_name from mo_catalog.mo_role_privs where role_name = 'r1';
+role_name    privilege_name
+r1    database ownership
+r1    table ownership
+drop role r1;
+drop user u1;
+drop database test;
+drop account acc_idx;
