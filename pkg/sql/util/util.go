@@ -104,30 +104,11 @@ func DbIsSystemDb(dbName string) bool {
 }
 
 // Build the filter condition AST expression for mo_database, as follows:
-// account_id = cur_accountId or (account_id = 0 and datname in ('mo_catalog'))
+// account_id = cur_accountId
 func BuildMoDataBaseFilter(curAccountId uint64) tree.Expr {
 	// left is: account_id = cur_accountId
 	left := makeAccountIdEqualAst(curAccountId)
-
-	datnameColName := &tree.UnresolvedName{
-		NumParts: 1,
-		Parts:    tree.NameParts{catalog.SystemDBAttr_Name},
-	}
-
-	mo_catalogConst := tree.NewNumValWithType(constant.MakeString(catalog.MO_CATALOG), catalog.MO_CATALOG, false, tree.P_char)
-	inValues := tree.NewTuple(tree.Exprs{mo_catalogConst})
-	// datname in ('mo_catalog')
-	inExpr := tree.NewComparisonExpr(tree.IN, datnameColName, inValues)
-
-	// account_id = 0
-	accountIdEqulZero := makeAccountIdEqualAst(0)
-	// andExpr is:account_id = 0 and datname in ('mo_catalog')
-	andExpr := tree.NewAndExpr(accountIdEqulZero, inExpr)
-
-	// right is:(account_id = 0 and datname in ('mo_catalog'))
-	right := tree.NewParenExpr(andExpr)
-	// return is: account_id = cur_accountId or (account_id = 0 and datname in ('mo_catalog'))
-	return tree.NewOrExpr(left, right)
+	return tree.NewOrExpr(left, left)
 }
 
 func BuildSysStatementInfoFilter(acctName string) tree.Expr {
