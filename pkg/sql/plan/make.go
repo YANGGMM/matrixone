@@ -254,15 +254,22 @@ func MakePlan2NullTextConstExprWithType(v string) *plan.Expr {
 }
 
 func makePlan2CastExpr(ctx context.Context, expr *Expr, targetType *Type) (*Expr, error) {
+	var err error
 	if isSameColumnType(expr.Typ, targetType) {
 		return expr, nil
 	}
 	targetType.NotNullable = expr.Typ.NotNullable
-	t1, t2 := makeTypeByPlan2Expr(expr), makeTypeByPlan2Type(targetType)
 	if types.T(expr.Typ.Id) == types.T_any {
 		expr.Typ = targetType
 		return expr, nil
 	}
+	if targetType.Id == int32(types.T_enum) {
+		expr, err = funcCastForEnumType(ctx, expr, targetType)
+		if err != nil {
+			return nil, err
+		}
+	}
+	t1, t2 := makeTypeByPlan2Expr(expr), makeTypeByPlan2Type(targetType)
 	fGet, err := function.GetFunctionByName(ctx, "cast", []types.Type{t1, t2})
 	if err != nil {
 		return nil, err
@@ -284,6 +291,37 @@ func makePlan2CastExpr(ctx context.Context, expr *Expr, targetType *Type) (*Expr
 		},
 		Typ: targetType,
 	}, nil
+}
+
+func funcCastForEnumType(ctx context.Context, expr *Expr, targetType *Type) (*Expr, error) {
+	if targetType.Id != int32(types.T_enum) {
+		return expr, nil
+	}
+	if constVal, ok := expr.Expr.(*plan.Expr_C); ok {
+		if val, ok := constVal.C.Value.(*plan.Const_Sval); ok {
+			index, err := types.ParseEnum(targetType.Enumvalues, val.Sval)
+			if err != nil {
+				return nil, err
+			}
+			expr = &plan.Expr{
+				Typ: &plan.Type{
+					Id:          int32(types.T_uint16),
+					NotNullable: expr.Typ.NotNullable,
+					Width:       expr.Typ.Width,
+					Scale:       expr.Typ.Scale,
+				},
+				Expr: &plan.Expr_C{
+					C: &plan.Const{
+						IsBin: false,
+						Value: &plan.Const_U16Val{
+							U16Val: uint32(index),
+						},
+					},
+				},
+			}
+		}
+	}
+	return expr, nil
 }
 
 // if typ is decimal128 and decimal64 without scalar and width
