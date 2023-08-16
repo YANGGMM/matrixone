@@ -16,8 +16,10 @@ package plan
 
 import (
 	"context"
+	"strings"
 	"unicode/utf8"
 
+	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/sql/plan/function"
 
 	"github.com/matrixorigin/matrixone/pkg/catalog"
@@ -318,6 +320,10 @@ func funcCastForEnumType(ctx context.Context, expr *Expr, targetType *Type) (*Ex
 						},
 					},
 				},
+			}
+		} else if val, ok := constVal.C.Value.(*plan.Const_I64Val); ok {
+			if int(val.I64Val) > len(strings.Split(targetType.Enumvalues, ",")) {
+				return nil, moerr.NewInvalidInput(ctx, "invalid default value for enum type column:  %d ", int(val.I64Val))
 			}
 		}
 	}
