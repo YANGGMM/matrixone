@@ -471,32 +471,22 @@ func doDumpQueryResult(ctx context.Context, ses *Session, eParam *tree.ExportPar
 	for i := 0; i < 1; i++ {
 		mrs.Data[i] = make([]interface{}, columnCount)
 	}
-	exportParam := &ExportParam{
-		ExportParam: eParam,
+	exportParam := &ExportConfig{
+		userConfig: eParam,
 	}
 	//prepare output queue
 	oq := NewOutputQueue(ctx, ses, columnCount, mrs, exportParam)
 	oq.reset()
-	oq.ep.OutTofile = true
 	//prepare export param
-	exportParam.DefaultBufSize = ses.GetParameterUnit().SV.ExportDataDefaultFlushSize
-	exportParam.UseFileService = true
-	exportParam.FileService = ses.GetParameterUnit().FileService
-	exportParam.Ctx = ctx
+	exportParam.seFileService = true
+	exportParam.fileService = ses.GetParameterUnit().FileService
+	exportParam.ctx = ctx
 	defer func() {
-		exportParam.LineBuffer = nil
-		exportParam.OutputStr = nil
-		if exportParam.AsyncReader != nil {
-			_ = exportParam.AsyncReader.Close()
-		}
-		if exportParam.AsyncWriter != nil {
-			_ = exportParam.AsyncWriter.Close()
-		}
+		_ = finishExport(ctx, ses, exportParam)
 	}()
-	initExportFileParam(exportParam, mrs)
 
 	//open output file
-	if err = openNewFile(ctx, exportParam, mrs); err != nil {
+	if err = initExportConfig(ctx, exportParam, mrs, ses.GetParameterUnit().SV.ExportDataDefaultFlushSize); err != nil {
 		return err
 	}
 
@@ -553,7 +543,7 @@ func doDumpQueryResult(ctx context.Context, ses *Session, eParam *tree.ExportPar
 		return err
 	}
 
-	err = Close(exportParam)
+	err = closeFile(exportParam)
 	if err != nil {
 		return err
 	}

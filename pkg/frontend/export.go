@@ -19,146 +19,320 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
-	"os"
-	"strconv"
-	"strings"
-	"sync"
-
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
 	"github.com/matrixorigin/matrixone/pkg/container/bytejson"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
-	"github.com/matrixorigin/matrixone/pkg/container/vector"
 	"github.com/matrixorigin/matrixone/pkg/defines"
 	"github.com/matrixorigin/matrixone/pkg/fileservice"
-	"go.uber.org/zap"
+	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 	"golang.org/x/sync/errgroup"
+	"io"
+	"os"
+	"strconv"
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
-
-	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 )
 
-type ExportParam struct {
-	*tree.ExportParam
-	// file handler
-	File *os.File
-	// bufio.writer
-	Writer *bufio.Writer
+const (
+	escape byte = '"'
+)
+
+type ExportConfig struct {
+	// configs from user input
+	userConfig *tree.ExportParam
+
 	// curFileSize
-	CurFileSize uint64
-	Rows        uint64
-	FileCnt     uint
-	ColumnFlag  []bool
-	Symbol      [][]byte
+	curFileSize uint64
+	rows        uint64
+	fileCnt     uint
+	columnFlag  []bool   // column : force quote or not
+	symbol      [][]byte // field separator of line initialized before export
 	// default flush size
-	DefaultBufSize int64
-	OutputStr      []byte
-	LineSize       uint64
+	defaultBufSize int64
+	outputStr      []byte
+	lineSize       uint64
+
+	writtenCsvBytes uint64
 
 	//file service & buffer for the line
-	UseFileService bool
-	writeParam
-	FileService fileservice.FileService
-	LineBuffer  *bytes.Buffer
-	Ctx         context.Context
-	AsyncReader *io.PipeReader
-	AsyncWriter *io.PipeWriter
-	AsyncGroup  *errgroup.Group
+	seFileService bool
+
+	diskFileConfig
+	fsConfig
 }
 
-type writeParam struct {
-	First      bool
-	OutTofile  bool
-	Index      int32
-	WriteIndex int32
-	ByteChan   chan *BatchByte
-	BatchMap   map[int32]([]byte)
-}
-
-type BatchByte struct {
-	index     int32
-	writeByte []byte
-	err       error
-}
-
-var OpenFile = os.OpenFile
-var escape byte = '"'
-
-type CloseExportData struct {
-	stopExportData chan interface{}
-	onceClose      sync.Once
-}
-
-func NewCloseExportData() *CloseExportData {
-	return &CloseExportData{
-		stopExportData: make(chan interface{}),
-	}
-}
-
-func (cld *CloseExportData) Open() {
-}
-
-func (cld *CloseExportData) Close() {
-	cld.onceClose.Do(func() {
-		close(cld.stopExportData)
-	})
-}
-
-func initExportFileParam(ep *ExportParam, mrs *MysqlResultSet) {
-	ep.DefaultBufSize *= 1024 * 1024
+func initExportConfig(ctx context.Context, ec *ExportConfig, mrs *MysqlResultSet, bufSize int64) error {
+	var err error
+	//1. basic init
+	ec.defaultBufSize = bufSize
+	ec.defaultBufSize *= 1024 * 1024
 	n := (int)(mrs.GetColumnCount())
 	if n <= 0 {
-		return
+		return moerr.NewInternalError(ctx, "the column count is zero")
 	}
-	ep.Symbol = make([][]byte, n)
+	// field separator
+	ec.symbol = make([][]byte, n)
 	for i := 0; i < n-1; i++ {
-		ep.Symbol[i] = []byte(ep.Fields.Terminated)
+		ec.symbol[i] = []byte(ec.userConfig.Fields.Terminated)
 	}
-	ep.Symbol[n-1] = []byte(ep.Lines.TerminatedBy)
-	ep.ColumnFlag = make([]bool, len(mrs.Name2Index))
-	for i := 0; i < len(ep.ForceQuote); i++ {
-		col, ok := mrs.Name2Index[ep.ForceQuote[i]]
+	//line terminated
+	ec.symbol[n-1] = []byte(ec.userConfig.Lines.TerminatedBy)
+	//force quote column flag
+	ec.columnFlag = make([]bool, len(mrs.Name2Index))
+	for i := 0; i < len(ec.userConfig.ForceQuote); i++ {
+		col, ok := mrs.Name2Index[ec.userConfig.ForceQuote[i]]
 		if ok {
-			ep.ColumnFlag[col] = true
+			ec.columnFlag[col] = true
 		}
+	}
+
+	//2. init first file
+	if err = openNewFile(ctx, ec, mrs); err != nil {
+		return err
+	}
+	return err
+}
+
+// needExportToFile checks needing to export into file or not
+func (ec *ExportConfig) needExportToFile() bool {
+	return ec != nil && ec.userConfig != nil && ec.userConfig.Outfile
+}
+
+// sendBatch sends the batch from pipeline to the export routine
+func (ec *ExportConfig) sendBatch(bat *batch.Batch) {
+	if bat != nil {
+		ec.batchChan <- bat
 	}
 }
 
-var openNewFile = func(ctx context.Context, ep *ExportParam, mrs *MysqlResultSet) error {
-	lineSize := ep.LineSize
+// initAsyncExport starts the async export routine
+func initAsyncExport(ctx context.Context, ses *Session, ec *ExportConfig) {
+	if !ec.first {
+		ec.first = true
+		ec.toDiskFile = true
+		ec.batchChan = make(chan *batch.Batch)
+		ec.asyncGroup2 = new(errgroup.Group)
+		ec.asyncGroup2.Go(func() error {
+			return doExport(ctx, ses, ec)
+		})
+	}
+}
+
+// doExport the export function
+func doExport(ctx context.Context, ses *Session, ec *ExportConfig) error {
 	var err error
-	ep.CurFileSize = 0
-	if !ep.UseFileService {
-		filePath := getExportFilePath(ep.FilePath, ep.FileCnt)
-		ep.File, err = OpenFile(filePath, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o666)
+	var quit bool
+	var bat *batch.Batch
+	var ok bool
+	for {
+		select {
+		case <-ctx.Done():
+			quit = true
+		case bat, ok = <-ec.batchChan:
+			if !ok {
+				quit = true
+			}
+		}
+		if quit {
+			break
+		}
+
+		if bat == nil {
+			continue
+		}
+
+		oq := NewOutputQueue(ctx, ses, len(bat.Vecs), nil, ec)
+		err = writeBatch(ctx, ses, oq, bat)
 		if err != nil {
 			return err
 		}
-		ep.Writer = bufio.NewWriterSize(ep.File, int(ep.DefaultBufSize))
+
+		err = oq.flush()
+		if err != nil {
+			return err
+		}
+	}
+
+	return err
+}
+
+// writeBatch writes data batch into file
+func writeBatch(ctx context.Context, ses *Session, oq *outputQueue, bat *batch.Batch) error {
+	var err error
+	n := bat.Vecs[0].Length()
+	defer func() {
+		bat.Clean(ses.GetMemPool())
+	}()
+	for j := 0; j < n; j++ { //row index
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		//do not need copy bytes here. because the batch has been copied.
+		_, err = extractRowFromEveryVector(ses, bat, j, oq, false)
+		if err != nil {
+			return err
+		}
+		//if oq.showStmtType == ShowTableStatus {
+		//	row2 := make([]interface{}, len(row))
+		//	copy(row2, row)
+		//	ses.AppendData(row2)
+		//}
+	}
+	return err
+}
+
+// fsConfig writes into fileservice for save query result
+type fsConfig struct {
+	fileService fileservice.FileService
+	lineBuffer  *bytes.Buffer
+	ctx         context.Context
+	asyncReader *io.PipeReader
+	asyncWriter *io.PipeWriter
+	asyncGroup  *errgroup.Group
+}
+
+// diskFileConfig writes into disk file
+type diskFileConfig struct {
+	first bool
+
+	// file handler
+	file *os.File
+
+	// bufio.writer
+	writer *bufio.Writer
+
+	// DiskFile can be seeked and truncated.
+	toDiskFile bool
+
+	batchChan   chan *batch.Batch
+	asyncGroup2 *errgroup.Group
+}
+
+var openFile = os.OpenFile
+
+var flush = func(ep *ExportConfig) error {
+	if !ep.seFileService {
+		return ep.writer.Flush()
+	}
+	return nil
+}
+
+var seek = func(ep *ExportConfig) (int64, error) {
+	if !ep.seFileService {
+		return ep.file.Seek(int64(ep.curFileSize-ep.lineSize), io.SeekStart)
+	}
+	return 0, nil
+}
+
+var read = func(ep *ExportConfig) (int, error) {
+	if !ep.seFileService {
+		ep.outputStr = make([]byte, ep.lineSize)
+		return ep.file.Read(ep.outputStr)
+	} else {
+		ep.outputStr = make([]byte, ep.lineSize)
+		copy(ep.outputStr, ep.lineBuffer.Bytes())
+		ep.lineBuffer.Reset()
+		return int(ep.lineSize), nil
+	}
+}
+
+var truncate = func(ep *ExportConfig) error {
+	if !ep.seFileService {
+		return ep.file.Truncate(int64(ep.curFileSize - ep.lineSize))
+	} else {
+		return nil
+	}
+}
+
+var closeFile = func(ep *ExportConfig) error {
+	var err error
+	if !ep.seFileService {
+		ep.fileCnt++
+		if err = flush(ep); err != nil {
+			return err
+		}
+		return ep.file.Close()
+	} else {
+		ep.fileCnt++
+		err = ep.asyncWriter.Close()
+		if err != nil {
+			return err
+		}
+		err = ep.asyncGroup.Wait()
+		if err != nil {
+			return err
+		}
+		err = ep.asyncReader.Close()
+		if err != nil {
+			return err
+		}
+		ep.asyncReader = nil
+		ep.asyncWriter = nil
+		ep.asyncGroup = nil
+		return err
+	}
+}
+
+var write = func(ep *ExportConfig, output []byte) (int, error) {
+	if !ep.seFileService {
+		return ep.writer.Write(output)
+	} else {
+		return ep.lineBuffer.Write(output)
+	}
+}
+
+var endOfLine = func(ep *ExportConfig) (int, error) {
+	if ep.seFileService {
+		n, err := ep.asyncWriter.Write(ep.lineBuffer.Bytes())
+		if err != nil {
+			err2 := ep.asyncWriter.CloseWithError(err)
+			if err2 != nil {
+				return 0, err2
+			}
+		}
+		ep.lineBuffer.Reset()
+		return n, err
+	}
+	return 0, nil
+}
+
+var openNewFile = func(ctx context.Context, ep *ExportConfig, mrs *MysqlResultSet) error {
+	lineSize := ep.lineSize
+	var err error
+	ep.curFileSize = 0
+	if !ep.seFileService {
+		filePath := genExportFilePath(ep.userConfig.FilePath, ep.fileCnt)
+		ep.file, err = openFile(filePath, os.O_RDWR|os.O_EXCL|os.O_CREATE, 0o666)
+		if err != nil {
+			return err
+		}
+		ep.writer = bufio.NewWriterSize(ep.file, int(ep.defaultBufSize))
 	} else {
 		//default 1MB
-		if ep.LineBuffer == nil {
-			ep.LineBuffer = &bytes.Buffer{}
+		if ep.lineBuffer == nil {
+			ep.lineBuffer = &bytes.Buffer{}
 		} else {
-			ep.LineBuffer.Reset()
+			ep.lineBuffer.Reset()
 		}
-		ep.AsyncReader, ep.AsyncWriter = io.Pipe()
-		filePath := getExportFilePath(ep.FilePath, ep.FileCnt)
+		ep.asyncReader, ep.asyncWriter = io.Pipe()
+		filePath := genExportFilePath(ep.userConfig.FilePath, ep.fileCnt)
 
 		asyncWriteFunc := func() error {
 			vec := fileservice.IOVector{
 				FilePath: filePath,
 				Entries: []fileservice.IOEntry{
 					{
-						ReaderForWrite: ep.AsyncReader,
+						ReaderForWrite: ep.asyncReader,
 						Size:           -1,
 					},
 				},
 			}
-			err := ep.FileService.Write(ctx, vec)
+			err := ep.fileService.Write(ctx, vec)
 			if err != nil {
-				err2 := ep.AsyncReader.CloseWithError(err)
+				err2 := ep.asyncReader.CloseWithError(err)
 				if err2 != nil {
 					return err2
 				}
@@ -166,40 +340,40 @@ var openNewFile = func(ctx context.Context, ep *ExportParam, mrs *MysqlResultSet
 			return err
 		}
 
-		ep.AsyncGroup, _ = errgroup.WithContext(ctx)
-		ep.AsyncGroup.Go(asyncWriteFunc)
+		ep.asyncGroup = new(errgroup.Group)
+		ep.asyncGroup.Go(asyncWriteFunc)
 	}
-	if ep.Header {
+	if ep.userConfig.Header {
 		var header string
 		n := len(mrs.Columns)
 		if n == 0 {
 			return nil
 		}
 		for i := 0; i < n-1; i++ {
-			header += mrs.Columns[i].Name() + ep.Fields.Terminated
+			header += mrs.Columns[i].Name() + ep.userConfig.Fields.Terminated
 		}
-		header += mrs.Columns[n-1].Name() + ep.Lines.TerminatedBy
-		if ep.MaxFileSize != 0 && uint64(len(header)) >= ep.MaxFileSize {
+		header += mrs.Columns[n-1].Name() + ep.userConfig.Lines.TerminatedBy
+		if ep.userConfig.MaxFileSize != 0 && uint64(len(header)) >= ep.userConfig.MaxFileSize {
 			return moerr.NewInternalError(ctx, "the header line size is over the maxFileSize")
 		}
-		if err := writeDataToCSVFile(ep, []byte(header)); err != nil {
+		if err := writeFile(ep, []byte(header)); err != nil {
 			return err
 		}
-		if _, err := EndOfLine(ep); err != nil {
+		if _, err := endOfLine(ep); err != nil {
 			return err
 		}
 	}
 	if lineSize != 0 {
-		ep.LineSize = 0
-		ep.Rows = 0
-		if err := writeDataToCSVFile(ep, ep.OutputStr); err != nil {
+		ep.lineSize = 0
+		ep.rows = 0
+		if err := writeFile(ep, ep.outputStr); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func getExportFilePath(filename string, fileCnt uint) string {
+func genExportFilePath(filename string, fileCnt uint) string {
 	if fileCnt == 0 {
 		return filename
 	} else {
@@ -210,127 +384,47 @@ func getExportFilePath(filename string, fileCnt uint) string {
 var formatOutputString = func(oq *outputQueue, tmp, symbol []byte, enclosed byte, flag bool) error {
 	var err error
 	if flag {
-		if err = writeToCSVFile(oq, []byte{enclosed}); err != nil {
+		if err = writeBytesToFile(oq, []byte{enclosed}); err != nil {
 			return err
 		}
 	}
-	if err = writeToCSVFile(oq, tmp); err != nil {
+	if err = writeBytesToFile(oq, tmp); err != nil {
 		return err
 	}
 	if flag {
-		if err = writeToCSVFile(oq, []byte{enclosed}); err != nil {
+		if err = writeBytesToFile(oq, []byte{enclosed}); err != nil {
 			return err
 		}
 	}
-	if err = writeToCSVFile(oq, symbol); err != nil {
+	if err = writeBytesToFile(oq, symbol); err != nil {
 		return err
 	}
 	return nil
 }
 
-var Flush = func(ep *ExportParam) error {
-	if !ep.UseFileService {
-		return ep.Writer.Flush()
-	}
-	return nil
-}
-
-var Seek = func(ep *ExportParam) (int64, error) {
-	if !ep.UseFileService {
-		return ep.File.Seek(int64(ep.CurFileSize-ep.LineSize), io.SeekStart)
-	}
-	return 0, nil
-}
-
-var Read = func(ep *ExportParam) (int, error) {
-	if !ep.UseFileService {
-		ep.OutputStr = make([]byte, ep.LineSize)
-		return ep.File.Read(ep.OutputStr)
-	} else {
-		ep.OutputStr = make([]byte, ep.LineSize)
-		copy(ep.OutputStr, ep.LineBuffer.Bytes())
-		ep.LineBuffer.Reset()
-		return int(ep.LineSize), nil
-	}
-}
-
-var Truncate = func(ep *ExportParam) error {
-	if !ep.UseFileService {
-		return ep.File.Truncate(int64(ep.CurFileSize - ep.LineSize))
-	} else {
-		return nil
-	}
-}
-
-var Close = func(ep *ExportParam) error {
-	if !ep.UseFileService {
-		ep.FileCnt++
-		return ep.File.Close()
-	} else {
-		ep.FileCnt++
-		err := ep.AsyncWriter.Close()
-		if err != nil {
+// writeBytesToFile writes bytes into file.
+// if the file size is over the maxFileSize, it will close the file and open a new file.
+func writeBytesToFile(oq *outputQueue, output []byte) error {
+	if oq.ep.userConfig.MaxFileSize != 0 && oq.ep.curFileSize+uint64(len(output)) > oq.ep.userConfig.MaxFileSize {
+		if err := flush(oq.ep); err != nil {
 			return err
 		}
-		err = ep.AsyncGroup.Wait()
-		if err != nil {
-			return err
-		}
-		err = ep.AsyncReader.Close()
-		if err != nil {
-			return err
-		}
-		ep.AsyncReader = nil
-		ep.AsyncWriter = nil
-		ep.AsyncGroup = nil
-		return err
-	}
-}
-
-var Write = func(ep *ExportParam, output []byte) (int, error) {
-	if !ep.UseFileService {
-		return ep.Writer.Write(output)
-	} else {
-		return ep.LineBuffer.Write(output)
-	}
-}
-
-var EndOfLine = func(ep *ExportParam) (int, error) {
-	if ep.UseFileService {
-		n, err := ep.AsyncWriter.Write(ep.LineBuffer.Bytes())
-		if err != nil {
-			err2 := ep.AsyncWriter.CloseWithError(err)
-			if err2 != nil {
-				return 0, err2
-			}
-		}
-		ep.LineBuffer.Reset()
-		return n, err
-	}
-	return 0, nil
-}
-
-func writeToCSVFile(oq *outputQueue, output []byte) error {
-	if oq.ep.MaxFileSize != 0 && oq.ep.CurFileSize+uint64(len(output)) > oq.ep.MaxFileSize {
-		if err := Flush(oq.ep); err != nil {
-			return err
-		}
-		if oq.ep.LineSize != 0 && oq.ep.OutTofile {
-			if _, err := Seek(oq.ep); err != nil {
+		if oq.ep.lineSize != 0 && oq.ep.toDiskFile {
+			if _, err := seek(oq.ep); err != nil {
 				return err
 			}
 			for {
-				if n, err := Read(oq.ep); err != nil {
+				if n, err := read(oq.ep); err != nil {
 					return err
-				} else if uint64(n) == oq.ep.LineSize {
+				} else if uint64(n) == oq.ep.lineSize {
 					break
 				}
 			}
-			if err := Truncate(oq.ep); err != nil {
+			if err := truncate(oq.ep); err != nil {
 				return err
 			}
 		}
-		if err := Close(oq.ep); err != nil {
+		if err := closeFile(oq.ep); err != nil {
 			return err
 		}
 		if err := openNewFile(oq.ctx, oq.ep, oq.mrs); err != nil {
@@ -338,189 +432,24 @@ func writeToCSVFile(oq *outputQueue, output []byte) error {
 		}
 	}
 
-	if err := writeDataToCSVFile(oq.ep, output); err != nil {
+	if err := writeFile(oq.ep, output); err != nil {
 		return err
 	}
 	return nil
 }
 
-var writeDataToCSVFile = func(ep *ExportParam, output []byte) error {
+var writeFile = func(ep *ExportConfig, output []byte) error {
 	for {
-		if n, err := Write(ep, output); err != nil {
+		if n, err := write(ep, output); err != nil {
 			return err
 		} else if n == len(output) {
 			break
 		}
 	}
-	ep.LineSize += uint64(len(output))
-	ep.CurFileSize += uint64(len(output))
+	ep.lineSize += uint64(len(output))
+	ep.curFileSize += uint64(len(output))
+	ep.writtenCsvBytes += uint64(len(output))
 	return nil
-}
-
-func appendBytes(writeByte, tmp, symbol []byte, enclosed byte, flag bool) []byte {
-	if flag {
-		writeByte = append(writeByte, enclosed)
-	}
-	writeByte = append(writeByte, tmp...)
-	if flag {
-		writeByte = append(writeByte, enclosed)
-	}
-	writeByte = append(writeByte, symbol...)
-	return writeByte
-}
-
-func preCopyBat(obj interface{}, bat *batch.Batch) *batch.Batch {
-	ses := obj.(*Session)
-	bat2 := batch.NewWithSize(len(bat.Vecs))
-	for i, vec := range bat.Vecs {
-		bat2.Vecs[i], _ = vec.Dup(ses.GetMemPool())
-	}
-	bat2.SetRowCount(bat.RowCount())
-	return bat2
-}
-
-func initExportFirst(oq *outputQueue) {
-	if !oq.ep.First {
-		oq.ep.First = true
-		oq.ep.ByteChan = make(chan *BatchByte, 10)
-		oq.ep.BatchMap = make(map[int32][]byte)
-		oq.ep.Index = 0
-		oq.ep.WriteIndex = 0
-	}
-	oq.ep.Index++
-}
-
-func formatJsonString(str string, flag bool) string {
-	if len(str) < 2 {
-		return "\"" + str + "\""
-	}
-	tmp := strings.ReplaceAll(str, "\",", "\"\",")
-	if tmp[0] != '"' && tmp[len(tmp)-1] != '"' && !flag {
-		return "\"" + tmp + "\""
-	}
-	return tmp
-}
-
-func constructByte(obj interface{}, bat *batch.Batch, index int32, ByteChan chan *BatchByte, oq *outputQueue) {
-	ses := obj.(*Session)
-	symbol := oq.ep.Symbol
-	closeby := oq.ep.Fields.EnclosedBy
-	flag := oq.ep.ColumnFlag
-	writeByte := make([]byte, 0)
-	for i := 0; i < bat.RowCount(); i++ {
-		for j, vec := range bat.Vecs {
-			if vec.GetNulls().Contains(uint64(i)) {
-				writeByte = appendBytes(writeByte, []byte("\\N"), symbol[j], closeby, flag[j])
-				continue
-			}
-			switch vec.GetType().Oid { //get col
-			case types.T_json:
-				val := types.DecodeJson(vec.GetBytesAt(i))
-				writeByte = appendBytes(writeByte, []byte(formatJsonString(val.String(), flag[j])), symbol[j], closeby, flag[j])
-			case types.T_bool:
-				val := vector.GetFixedAt[bool](vec, i)
-				if val {
-					writeByte = appendBytes(writeByte, []byte("true"), symbol[j], closeby, flag[j])
-				} else {
-					writeByte = appendBytes(writeByte, []byte("false"), symbol[j], closeby, flag[j])
-				}
-			case types.T_int8:
-				val := vector.GetFixedAt[int8](vec, i)
-				writeByte = appendBytes(writeByte, []byte(strconv.FormatInt(int64(val), 10)), symbol[j], closeby, flag[j])
-			case types.T_int16:
-				val := vector.GetFixedAt[int16](vec, i)
-				writeByte = appendBytes(writeByte, []byte(strconv.FormatInt(int64(val), 10)), symbol[j], closeby, flag[j])
-			case types.T_int32:
-				val := vector.GetFixedAt[int32](vec, i)
-				writeByte = appendBytes(writeByte, []byte(strconv.FormatInt(int64(val), 10)), symbol[j], closeby, flag[j])
-			case types.T_int64:
-				val := vector.GetFixedAt[int64](vec, i)
-				writeByte = appendBytes(writeByte, []byte(strconv.FormatInt(int64(val), 10)), symbol[j], closeby, flag[j])
-			case types.T_uint8:
-				val := vector.GetFixedAt[uint8](vec, i)
-				writeByte = appendBytes(writeByte, []byte(strconv.FormatUint(uint64(val), 10)), symbol[j], closeby, flag[j])
-			case types.T_uint16:
-				val := vector.GetFixedAt[uint16](vec, i)
-				writeByte = appendBytes(writeByte, []byte(strconv.FormatUint(uint64(val), 10)), symbol[j], closeby, flag[j])
-			case types.T_uint32:
-				val := vector.GetFixedAt[uint32](vec, i)
-				writeByte = appendBytes(writeByte, []byte(strconv.FormatUint(uint64(val), 10)), symbol[j], closeby, flag[j])
-			case types.T_uint64:
-				val := vector.GetFixedAt[uint64](vec, i)
-				writeByte = appendBytes(writeByte, []byte(strconv.FormatUint(uint64(val), 10)), symbol[j], closeby, flag[j])
-			case types.T_float32:
-				val := vector.GetFixedAt[float32](vec, i)
-				if vec.GetType().Scale < 0 || vec.GetType().Width == 0 {
-					writeByte = appendBytes(writeByte, []byte(strconv.FormatFloat(float64(val), 'f', -1, 32)), symbol[j], closeby, flag[j])
-				} else {
-					writeByte = appendBytes(writeByte, []byte(strconv.FormatFloat(float64(val), 'f', int(vec.GetType().Scale), 64)), symbol[j], closeby, flag[j])
-				}
-			case types.T_float64:
-				val := vector.GetFixedAt[float64](vec, i)
-				if vec.GetType().Scale < 0 || vec.GetType().Width == 0 {
-					writeByte = appendBytes(writeByte, []byte(strconv.FormatFloat(float64(val), 'f', -1, 32)), symbol[j], closeby, flag[j])
-				} else {
-					writeByte = appendBytes(writeByte, []byte(strconv.FormatFloat(float64(val), 'f', int(vec.GetType().Scale), 64)), symbol[j], closeby, flag[j])
-				}
-			case types.T_char, types.T_varchar, types.T_blob, types.T_text, types.T_binary, types.T_varbinary:
-				value := addEscapeToString(vec.GetBytesAt(i))
-				writeByte = appendBytes(writeByte, value, symbol[j], closeby, true)
-			case types.T_date:
-				val := vector.GetFixedAt[types.Date](vec, i)
-				writeByte = appendBytes(writeByte, []byte(val.String()), symbol[j], closeby, flag[j])
-			case types.T_datetime:
-				scale := vec.GetType().Scale
-				val := vector.GetFixedAt[types.Datetime](vec, i).String2(scale)
-				writeByte = appendBytes(writeByte, []byte(val), symbol[j], closeby, flag[j])
-			case types.T_time:
-				scale := vec.GetType().Scale
-				val := vector.GetFixedAt[types.Time](vec, i).String2(scale)
-				writeByte = appendBytes(writeByte, []byte(val), symbol[j], closeby, flag[j])
-			case types.T_timestamp:
-				scale := vec.GetType().Scale
-				timeZone := ses.GetTimeZone()
-				val := vector.GetFixedAt[types.Timestamp](vec, i).String2(timeZone, scale)
-				writeByte = appendBytes(writeByte, []byte(val), symbol[j], closeby, flag[j])
-			case types.T_decimal64:
-				scale := vec.GetType().Scale
-				val := vector.GetFixedAt[types.Decimal64](vec, i).Format(scale)
-				writeByte = appendBytes(writeByte, []byte(val), symbol[j], closeby, flag[j])
-			case types.T_decimal128:
-				scale := vec.GetType().Scale
-				val := vector.GetFixedAt[types.Decimal128](vec, i).Format(scale)
-				writeByte = appendBytes(writeByte, []byte(val), symbol[j], closeby, flag[j])
-			case types.T_uuid:
-				val := vector.GetFixedAt[types.Uuid](vec, i).ToString()
-				writeByte = appendBytes(writeByte, []byte(val), symbol[j], closeby, flag[j])
-			case types.T_Rowid:
-				val := vector.GetFixedAt[types.Rowid](vec, i)
-				writeByte = appendBytes(writeByte, []byte(val.String()), symbol[j], closeby, flag[j])
-			case types.T_Blockid:
-				val := vector.GetFixedAt[types.Blockid](vec, i)
-				writeByte = appendBytes(writeByte, []byte(val.String()), symbol[j], closeby, flag[j])
-			case types.T_enum:
-				val := vector.GetFixedAt[types.Blockid](vec, i)
-				writeByte = appendBytes(writeByte, []byte(val.String()), symbol[j], closeby, flag[j])
-			default:
-				logError(ses, ses.GetDebugString(),
-					"Failed to construct byte due to unsupported type",
-					zap.Int("typeOid", int(vec.GetType().Oid)))
-				ByteChan <- &BatchByte{
-					err: moerr.NewInternalError(ses.requestCtx, "constructByte : unsupported type %d", vec.GetType().Oid),
-				}
-				bat.Clean(ses.GetMemPool())
-				return
-			}
-		}
-	}
-
-	ByteChan <- &BatchByte{
-		index:     index,
-		writeByte: writeByte,
-		err:       nil,
-	}
-	ses.writeCsvBytes.Add(int64(len(writeByte))) // statistic out traffic, CASE 2: select into
-	bat.Clean(ses.GetMemPool())
 }
 
 func addEscapeToString(s []byte) []byte {
@@ -544,15 +473,13 @@ func addEscapeToString(s []byte) []byte {
 	return ret
 }
 
+// exportDataToCSVFile
 func exportDataToCSVFile(oq *outputQueue) error {
-	if !oq.ep.OutTofile {
-		return exportDataToCSVFile2(oq)
-	}
-	oq.ep.LineSize = 0
+	oq.ep.lineSize = 0
 
-	symbol := oq.ep.Symbol
-	closeby := oq.ep.Fields.EnclosedBy
-	flag := oq.ep.ColumnFlag
+	symbol := oq.ep.symbol
+	closeby := oq.ep.userConfig.Fields.EnclosedBy
+	flag := oq.ep.columnFlag
 	for i := uint64(0); i < oq.mrs.GetColumnCount(); i++ {
 		column, err := oq.mrs.GetColumn(oq.ctx, i)
 		if err != nil {
@@ -708,69 +635,56 @@ func exportDataToCSVFile(oq *outputQueue) error {
 			return moerr.NewInternalError(oq.ctx, "unsupported column type %d ", mysqlColumn.ColumnType())
 		}
 	}
-	oq.ep.Rows++
-	_, err := EndOfLine(oq.ep)
+	oq.ep.rows++
+	_, err := endOfLine(oq.ep)
 	return err
 }
 
-func exportDataToCSVFile2(oq *outputQueue) error {
-	var tmp *BatchByte
-	select {
-	case tmp = <-oq.ep.ByteChan:
-	default:
-	}
-	if tmp != nil {
-		if tmp.err != nil {
-			return tmp.err
-		}
-		oq.ep.BatchMap[tmp.index] = tmp.writeByte
-	}
-
-	value, ok := oq.ep.BatchMap[oq.ep.WriteIndex+1]
-	if !ok {
-		return nil
-	}
-
-	if err := writeToCSVFile(oq, value); err != nil {
-		return err
-	}
-	oq.ep.WriteIndex++
-	oq.ep.BatchMap[oq.ep.WriteIndex] = nil
-	_, err := EndOfLine(oq.ep)
-	return err
-}
-
-func exportAllData(oq *outputQueue) error {
-	var tmp *BatchByte
-	for {
-		tmp = nil
-		if oq.ep.WriteIndex == oq.ep.Index {
-			break
-		}
-		select {
-		case tmp = <-oq.ep.ByteChan:
-		default:
-		}
-		if tmp != nil {
-			if tmp.err != nil {
-				return tmp.err
-			}
-			oq.ep.BatchMap[tmp.index] = tmp.writeByte
-		}
-
-		value, ok := oq.ep.BatchMap[oq.ep.WriteIndex+1]
-		if !ok {
-			continue
-		}
-		if err := writeToCSVFile(oq, value); err != nil {
+func finishExport(ctx context.Context, ses *Session, ec *ExportConfig) error {
+	var err error
+	if !ec.seFileService {
+		//close chan to notify the writer to quit
+		close(ec.batchChan)
+		err = ec.asyncGroup2.Wait()
+		defer func() {
+			ec.asyncGroup2 = nil
+			ec.batchChan = nil
+		}()
+		if err != nil {
 			return err
 		}
-		oq.ep.WriteIndex++
-		oq.ep.BatchMap[oq.ep.WriteIndex] = nil
+
+		if err = flush(ec); err != nil {
+			return err
+		}
+		if err = closeFile(ec); err != nil {
+			return err
+		}
+		ses.writeCsvBytes.Add(int64(ec.writtenCsvBytes))
+	} else {
+		ec.lineBuffer = nil
+		ec.outputStr = nil
+		if ec.asyncReader != nil {
+			_ = ec.asyncReader.Close()
+		}
+		if ec.asyncWriter != nil {
+			_ = ec.asyncWriter.Close()
+		}
+		ec.fileService = nil
+		ec.ctx = nil
 	}
-	oq.ep.First = false
-	oq.ep.FileCnt = 0
-	oq.ep.ByteChan = nil
-	oq.ep.BatchMap = nil
-	return nil
+	return err
+}
+
+func copyBatch(ses *Session, bat *batch.Batch) (*batch.Batch, error) {
+	var err error
+	bat2 := batch.NewWithSize(len(bat.Vecs))
+	for i, vec := range bat.Vecs {
+		bat2.Vecs[i], err = vec.Dup(ses.GetMemPool())
+		if err != nil {
+			return nil, err
+		}
+	}
+	bat2.SetRowCount(bat.RowCount())
+	return bat2, err
 }
