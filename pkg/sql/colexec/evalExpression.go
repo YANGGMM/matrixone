@@ -18,10 +18,12 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	util2 "github.com/matrixorigin/matrixone/pkg/common/util"
-	"github.com/matrixorigin/matrixone/pkg/vectorize/moarray"
 	"math"
 	"sort"
+	"strconv"
+
+	util2 "github.com/matrixorigin/matrixone/pkg/common/util"
+	"github.com/matrixorigin/matrixone/pkg/vectorize/moarray"
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/common/mpool"
@@ -354,7 +356,12 @@ func (expr *ParamExpressionExecutor) Eval(proc *process.Process, batches []*batc
 	}
 
 	if expr.vec == nil {
-		expr.vec = vector.NewConstBytes(expr.typ, val, 1, proc.Mp())
+		valInt64, err := strconv.ParseInt(string(val[0]), 10, 64)
+		if err != nil {
+			expr.vec = vector.NewConstBytes(expr.typ, val, 1, proc.Mp())
+		} else {
+			expr.vec = vector.NewConstFixed(types.T_int64.ToType(), valInt64, 1, proc.Mp())
+		}
 	} else {
 		err := vector.SetConstBytes(expr.vec, val, 1, proc.GetMPool())
 		if err != nil {
