@@ -435,7 +435,7 @@ import (
 // sp_begin_sym
 %token <str> SPBEGIN
 
-%token <str> BACKEND SERVERS
+%token <str> BACKEND SERVERS CLOUD_USER
 
 %type <statement> stmt block_stmt block_type_stmt normal_stmt
 %type <statements> stmt_list stmt_list_return
@@ -475,6 +475,7 @@ import (
 %type <exportParm> export_data_param_opt
 %type <loadParam> load_param_opt load_param_opt_2
 %type <tailParam> tail_param_opt
+%type <statement> save_query_result_stmt
 
 // case statement
 %type <statement> case_stmt
@@ -816,6 +817,7 @@ stmt:
     {
         $$ = tree.Statement(nil)
     }
+|   save_query_result_stmt
 
 normal_stmt:
     create_stmt
@@ -851,6 +853,12 @@ normal_stmt:
 |   kill_stmt
 |   backup_stmt
 
+save_query_result_stmt:
+    CLOUD_USER normal_stmt
+    {
+        $$ = $2
+    }
+
 backup_stmt:
     BACKUP STRING FILESYSTEM STRING
 	{
@@ -875,19 +883,19 @@ kill_stmt:
         var connectionId uint64
         switch v := $3.(type) {
         case uint64:
-	    connectionId = v
+	        connectionId = v
         case int64:
-	    connectionId = uint64(v)
+	        connectionId = uint64(v)
         default:
-	    yylex.Error("parse integral fail")
+	        yylex.Error("parse integral fail")
 	    return 1
-        }
+    }
 
-	$$ = &tree.Kill{
+	    $$ = &tree.Kill{
             Option: $2,
             ConnectionId: connectionId,
             StmtOption:  $4,
-	}
+	    }
     }
 
 kill_opt:
@@ -899,15 +907,15 @@ kill_opt:
 | CONNECTION
 {
     $$ = tree.KillOption{
-	Exist: true,
-	Typ: tree.KillTypeConnection,
+	    Exist: true,
+	    Typ: tree.KillTypeConnection,
     }
 }
 | QUERY
 {
     $$ = tree.KillOption{
-	Exist: true,
-	Typ: tree.KillTypeQuery,
+	    Exist: true,
+	    Typ: tree.KillTypeQuery,
     }
 }
 
@@ -3479,14 +3487,14 @@ show_accounts_stmt:
 show_publications_stmt:
     SHOW PUBLICATIONS like_opt
     {
-	$$ = &tree.ShowPublications{Like: $3}
+	    $$ = &tree.ShowPublications{Like: $3}
     }
 
 
 show_subscriptions_stmt:
     SHOW SUBSCRIPTIONS like_opt
     {
-	$$ = &tree.ShowSubscriptions{Like: $3}
+	    $$ = &tree.ShowSubscriptions{Like: $3}
     }
 
 like_opt:
@@ -3550,7 +3558,7 @@ show_create_stmt:
     }
 |   SHOW CREATE PUBLICATION db_name
     {
-	$$ = &tree.ShowCreatePublications{Name: $4}
+	    $$ = &tree.ShowCreatePublications{Name: $4}
     }
 
 show_servers_stmt:
@@ -3596,7 +3604,7 @@ truncate_table_stmt:
     }
 |   TRUNCATE TABLE table_name
     {
-	$$ = tree.NewTruncateTable($3)
+	    $$ = tree.NewTruncateTable($3)
     }
 
 drop_stmt:
@@ -3695,7 +3703,7 @@ drop_table_stmt:
 drop_connector_stmt:
     DROP CONNECTOR exists_opt table_name_list
     {
-	$$ = &tree.DropConnector{IfExists: $3, Names: $4}
+	    $$ = &tree.DropConnector{IfExists: $3, Names: $4}
     }
 
 drop_view_stmt:
@@ -10318,13 +10326,13 @@ non_reserved_keyword:
 |   STAGE
 |   STAGES
 |   BACKUP
-| FILESYSTEM
+|   FILESYSTEM
 
 func_not_keyword:
     DATE_ADD
-|    DATE_SUB
+|   DATE_SUB
 |   NOW
-|    ADDDATE
+|   ADDDATE
 |   CURDATE
 |   POSITION
 |   SESSION_USER
