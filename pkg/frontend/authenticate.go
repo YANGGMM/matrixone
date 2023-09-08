@@ -843,7 +843,7 @@ var (
 		"mo_pubs":                     0,
 		"mo_stages":                   0,
 	}
-	createDbInformationSchemaSql = "create database information_schema;"
+	createDbInformationSchemaSql = "create database if not exists information_schema;"
 	createAutoTableSql           = fmt.Sprintf(`create table if not exists %s (
 		table_id   bigint unsigned, 
 		col_name     varchar(770), 
@@ -7622,21 +7622,51 @@ func InitGeneralTenant(ctx context.Context, ses *Session, ca *tree.CreateAccount
 	bh := ses.GetBackgroundExec(ctx)
 	defer bh.Close()
 
-	//USE the mo_catalog
+	{
+		//create createDbSqls
+		createDbSqls := []string{
+			"create database if not exists " + motrace.SystemDBConst + ";",
+			"create database if not exists " + mometric.MetricDBConst + ";",
+			createDbInformationSchemaSql,
+			"create database if not exists mysql;",
+		}
+		for _, db := range createDbSqls {
+			err = bh.Exec(newTenantCtx, db)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	err = bh.Exec(ctx, "begin;")
+	defer func() {
+		err = finishTxn(ctx, bh, err)
+	}()
+	if err != nil {
+		return err
+	}
+
+	// use the mo_catalog
 	err = bh.Exec(ctx, "use mo_catalog;")
+	if err != nil {
+		return err
+	}
+	err = bh.Exec(newTenantCtx, createMoIndexesSql)
+	if err != nil {
+		return err
+	}
+
+	err = bh.Exec(newTenantCtx, createMoTablePartitionsSql)
+	if err != nil {
+		return err
+	}
+
+	err = bh.Exec(newTenantCtx, createAutoTableSql)
 	if err != nil {
 		return err
 	}
 
 	createNewAccount := func() (bool, error) {
-		err = bh.Exec(ctx, "begin;")
-		defer func() {
-			err = finishTxn(ctx, bh, err)
-		}()
-		if err != nil {
-			return false, err
-		}
-
 		exists, err = checkTenantExistsOrNot(ctx, bh, ca.Name)
 		if err != nil {
 			return false, err
@@ -7664,45 +7694,7 @@ func InitGeneralTenant(ctx context.Context, ses *Session, ca *tree.CreateAccount
 		return err
 	}
 
-	{
-		err = bh.Exec(newTenantCtx, createMoIndexesSql)
-		if err != nil {
-			return err
-		}
-
-		err = bh.Exec(newTenantCtx, createMoTablePartitionsSql)
-		if err != nil {
-			return err
-		}
-
-		err = bh.Exec(newTenantCtx, createAutoTableSql)
-		if err != nil {
-			return err
-		}
-
-		//create createDbSqls
-		createDbSqls := []string{
-			"create database " + motrace.SystemDBConst + ";",
-			"create database " + mometric.MetricDBConst + ";",
-			createDbInformationSchemaSql,
-			"create database mysql;",
-		}
-		for _, db := range createDbSqls {
-			err = bh.Exec(newTenantCtx, db)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
 	createTablesForNewAccount := func() error {
-		err = bh.Exec(ctx, "begin;")
-		defer func() {
-			err = finishTxn(ctx, bh, err)
-		}()
-		if err != nil {
-			return err
-		}
 		err = createTablesInMoCatalogOfGeneralTenant2(bh, ca, newTenantCtx, newTenant, ses.pu)
 		if err != nil {
 			return err
