@@ -7622,16 +7622,16 @@ func InitGeneralTenant(ctx context.Context, ses *Session, ca *tree.CreateAccount
 	bh := ses.GetBackgroundExec(ctx)
 	defer bh.Close()
 
-	err = bh.Exec(ctx, "begin;")
-	defer func() {
-		err = finishTxn(ctx, bh, err)
-	}()
+	// USE the mo_catalog
+	err = bh.Exec(ctx, "use mo_catalog;")
 	if err != nil {
 		return err
 	}
 
-	//USE the mo_catalog
-	err = bh.Exec(ctx, "use mo_catalog;")
+	err = bh.Exec(ctx, "begin;")
+	defer func() {
+		err = finishTxn(ctx, bh, err)
+	}()
 	if err != nil {
 		return err
 	}

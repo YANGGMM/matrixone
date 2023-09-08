@@ -67,10 +67,6 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func createDropDatabaseErrorInfo() string {
-	return "CREATE/DROP of database is not supported in transactions"
-}
-
 func onlyCreateStatementErrorInfo() string {
 	return "Only CREATE of DDL is supported in transactions"
 }
