@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/matrixorigin/matrixone/pkg/common/runtime"
 	"io"
 	gotrace "runtime/trace"
 	"sort"
@@ -30,6 +29,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/matrixorigin/matrixone/pkg/common/runtime"
 
 	"github.com/matrixorigin/matrixone/pkg/config"
 	"github.com/matrixorigin/matrixone/pkg/fileservice"
@@ -2394,9 +2395,7 @@ func (mce *MysqlCmdExecutor) canExecuteStatementInUncommittedTransaction(request
 	}
 	if !can {
 		//is ddl statement
-		if IsCreateDropDatabase(stmt) {
-			return moerr.NewInternalError(requestCtx, createDropDatabaseErrorInfo())
-		} else if IsDDL(stmt) {
+		if IsDDL(stmt) {
 			return moerr.NewInternalError(requestCtx, onlyCreateStatementErrorInfo())
 		} else if IsAdministrativeStatement(stmt) {
 			return moerr.NewInternalError(requestCtx, administrativeCommandIsUnsupportedInTxnErrorInfo())
