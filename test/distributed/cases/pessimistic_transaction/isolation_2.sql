@@ -385,3 +385,4 @@ select * from dis_table_07;
 commit;
 select * from dis_table_07;
 drop table dis_table_07;
+drop database if exists dis_db_02;

@@ -105,22 +105,19 @@ a    b    c
 2    aaaa    2020-09-08 00:00:00
 start transaction ;
 create database dis_db_01;
-internal error: CREATE/DROP of database is not supported in transactions
 use dis_db_01;
-invalid database dis_db_01
-Previous DML conflicts with existing constraints or data format. This transaction has to be aborted
 begin;
 create table dis_table_04(a int);
 insert into dis_table_04 values (4);
 use isolation_2;
 create table dis_table_04(a int);
-table dis_table_04 already exists
 insert into dis_table_04 values (4);
 drop database dis_db_01;
-Can't drop database 'dis_db_01'; database doesn't exist
 delete from dis_table_04 where a=4;
+no such table dis_db_01.dis_table_04
+Previous DML conflicts with existing constraints or data format. This transaction has to be aborted
 select * from dis_table_04;
-a
+SQL parser error: table "dis_table_04" does not exist
 rollback ;
 select * from dis_db_01.dis_table_04;
 SQL parser error: table "dis_table_04" does not exist
@@ -209,7 +206,6 @@ aaaa    2020-09-08 00:00:00
 vvv    2000-09-08 00:00:00
 begin ;
 create database dis_db_02;
-internal error: CREATE/DROP of database is not supported in transactions
 rollback ;
 commit;
 select b, c from dis_table_02;
@@ -249,14 +245,10 @@ vvv    2000-09-08 00:00:00
     1999-06-04 00:00:00
 aaaa    2000-09-02 00:00:00
 use dis_db_02;
-invalid database dis_db_02
 select b,c from dis_table_02;
-b    c
-aaaa    2020-09-08 00:00:00
-vvv    2000-09-08 00:00:00
-    1999-06-04 00:00:00
-aaaa    2000-09-02 00:00:00
+SQL parser error: table "dis_table_02" does not exist
 insert into dis_table_02(b,c) values ('','1999-06-04');
+no such table dis_db_02.dis_table_02
 create temporary table dis_temp_01(a int,b varchar(100),primary key(a));
 begin ;
 insert into dis_temp_01 values (233,'uuuu');
@@ -273,6 +265,8 @@ a    b
 drop table dis_temp_01;
 start transaction;
 load data infile '$resources/external_table_file/isolation_01.csv' into table dis_table_02;
+no such table dis_db_02.dis_table_02
+Previous DML conflicts with existing constraints or data format. This transaction has to be aborted
 use isolation_2;
 update dis_table_02 set b='pppp';
 select b, c from dis_table_02;
@@ -281,16 +275,8 @@ pppp    2020-09-08 00:00:00
 pppp    2000-09-08 00:00:00
 pppp    1999-06-04 00:00:00
 pppp    2000-09-02 00:00:00
-pppp    1999-06-04 00:00:00
 select b, c from dis_table_02;
-b    c
-    1897-04-29 00:00:00
-vvvvv    2030-12-29 00:00:00
-pppp    2020-09-08 00:00:00
-pppp    2000-09-08 00:00:00
-pppp    1999-06-04 00:00:00
-pppp    2000-09-02 00:00:00
-pppp    1999-06-04 00:00:00
+SQL parser error: table "dis_table_02" does not exist
 use isolation_2;
 begin ;
 create view dis_view_02 as select * from dis_table_02;
@@ -303,13 +289,11 @@ pppp    2020-09-08 00:00:00
 pppp    2000-09-08 00:00:00
 pppp    1999-06-04 00:00:00
 pppp    2000-09-02 00:00:00
-pppp    1999-06-04 00:00:00
 use isolation_2;
 select * from dis_view_02;
 SQL parser error: table "dis_view_02" does not exist
 select * from dis_view_02;
 SQL parser error: table "dis_view_02" does not exist
-Previous DML conflicts with existing constraints or data format. This transaction has to be aborted
 use isolation_2;
 insert into dis_table_02 values (2,'oooo','1802-03-20');
 Duplicate entry '2' for key 'a'
@@ -321,32 +305,28 @@ pppp    2020-09-08 00:00:00
 pppp    2000-09-08 00:00:00
 pppp    1999-06-04 00:00:00
 pppp    2000-09-02 00:00:00
-pppp    1999-06-04 00:00:00
 select * from dis_view_02;
 SQL parser error: table "dis_view_02" does not exist
 drop table dis_view_02;
-no such table isolation_2.dis_view_02
+no such table dis_db_02.dis_view_02
 begin ;
 select * from dis_table_01;
-a    b
-21    orange
-19    apple
+SQL parser error: table "dis_table_01" does not exist
+Previous DML conflicts with existing constraints or data format. This transaction has to be aborted
 truncate table dis_table_01;
-insert into dis_table_01 select 9999,'abcdefg';
 select * from dis_table_01;
 a    b
 explain select * from dis_table_01;
-QUERY PLAN
-Project
-  ->  Table Scan on isolation_2.dis_table_01
+SQL parser error: table "dis_table_01" does not exist
 commit ;
 select * from dis_table_01;
 a    b
 begin ;
-delete from dis_table_02 where a>1;;
+delete from dis_table_02 where a>1;
+no such table dis_db_02.dis_table_02
+Previous DML conflicts with existing constraints or data format. This transaction has to be aborted
 select b, c from dis_table_02;
-b    c
-pppp    2020-09-08 00:00:00
+SQL parser error: table "dis_table_02" does not exist
 use isolation_2;
 select b, c from dis_table_02;
 b    c
@@ -354,46 +334,55 @@ pppp    2020-09-08 00:00:00
 pppp    2000-09-08 00:00:00
 pppp    1999-06-04 00:00:00
 pppp    2000-09-02 00:00:00
-pppp    1999-06-04 00:00:00
 update dis_table_02 set b='tittttt' where a>1;
 select b, c from dis_table_02;
 b    c
 pppp    2020-09-08 00:00:00
+tittttt    2000-09-08 00:00:00
+tittttt    1999-06-04 00:00:00
+tittttt    2000-09-02 00:00:00
 select b, c from dis_table_02;
-b    c
-pppp    2020-09-08 00:00:00
+SQL parser error: table "dis_table_02" does not exist
 use isolation_2;
 rollback;
 start transaction ;
 update dis_table_02 set b='catttteee' where a>1;
 select b, c from dis_table_02;
 b    c
+catttteee    2000-09-08 00:00:00
+catttteee    1999-06-04 00:00:00
+catttteee    2000-09-02 00:00:00
 pppp    2020-09-08 00:00:00
 commit;
 commit;
 select b, c from dis_table_02;
-b    c
-pppp    2020-09-08 00:00:00
-use isolation_2;
+SQL parser error: table "dis_table_02" does not exist
 select b, c from dis_table_02;
 b    c
 pppp    2020-09-08 00:00:00
+catttteee    2000-09-08 00:00:00
+catttteee    1999-06-04 00:00:00
+catttteee    2000-09-02 00:00:00
 create database if not exists iso_db_02;
 start transaction ;
 use iso_db_02;
 show tables;
-tables_in_iso_db_02
+Tables_in_iso_db_02
 use iso_db_02;
 begin ;
 create table iso_table_0001(a int);
+Communications link failure
+
+The last packet successfully received from the server was 120,003 milliseconds ago.  The last packet sent successfully to the server was 120,003 milliseconds ago.
 insert into iso_table_0001 values (2);
 no such table iso_db_02.iso_table_0001
-Previous DML conflicts with existing constraints or data format. This transaction has to be aborted
 use iso_db_02;
 create table iso_table_0001(a int);
+Communications link failure
+
+The last packet successfully received from the server was 120,002 milliseconds ago.  The last packet sent successfully to the server was 120,004 milliseconds ago.
 drop database iso_db_02;
 commit;
-invalid database iso_db_02
 create table iso_table_0001(a int);
 not connect to a database
 commit;
@@ -511,16 +500,16 @@ Duplicate entry '(2,blue,2021-01-20 00:00:00)' for key '__mo_cpkey_col'
 select * from dis_table_07;
 a    b    c    d
 1    yellow    20.09    2020-09-27 00:00:00
-2    blue    11.0    2021-01-20 00:00:00
+2    blue    10.0    2021-01-20 00:00:00
 select * from dis_table_07;
 a    b    c    d
-2    blue    10.0    2021-01-20 00:00:00
 1    yellow    20.09    2020-09-27 00:00:00
+2    blue    10.0    2021-01-20 00:00:00
 commit;
 select * from dis_table_07;
 a    b    c    d
 1    yellow    20.09    2020-09-27 00:00:00
-2    blue    11.0    2021-01-20 00:00:00
+2    blue    10.0    2021-01-20 00:00:00
 insert into dis_table_07 values (2,'blue',12.00,'2024-01-20');
 begin;
 update dis_table_07 set d='2024-01-20' where a=2 and b='blue';
@@ -529,17 +518,18 @@ Previous DML conflicts with existing constraints or data format. This transactio
 select * from dis_table_07;
 a    b    c    d
 1    yellow    20.09    2020-09-27 00:00:00
-2    blue    11.0    2021-01-20 00:00:00
+2    blue    10.0    2021-01-20 00:00:00
 2    blue    12.0    2024-01-20 00:00:00
 select * from dis_table_07;
 a    b    c    d
 1    yellow    20.09    2020-09-27 00:00:00
-2    blue    11.0    2021-01-20 00:00:00
+2    blue    10.0    2021-01-20 00:00:00
 2    blue    12.0    2024-01-20 00:00:00
 commit;
 select * from dis_table_07;
 a    b    c    d
 1    yellow    20.09    2020-09-27 00:00:00
-2    blue    11.0    2021-01-20 00:00:00
+2    blue    10.0    2021-01-20 00:00:00
 2    blue    12.0    2024-01-20 00:00:00
 drop table dis_table_07;
+drop database if exists dis_db_02;

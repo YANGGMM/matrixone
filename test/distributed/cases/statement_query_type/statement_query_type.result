@@ -163,21 +163,18 @@ internal error: administrative command is unsupported in transactions
 create user user_name identified by 'password';
 internal error: administrative command is unsupported in transactions
 create database if not exists db1;
-internal error: CREATE/DROP of database is not supported in transactions
 grant create table,drop table on database *.* to test_role;
-internal error: administrative command is unsupported in transactions
+internal error: there is no role test_role
 revoke test_role from user_name;
-internal error: administrative command is unsupported in transactions
+internal error: there is no role or user user_name
 drop user user_name;
-internal error: administrative command is unsupported in transactions
+internal error: there is no user user_name
 drop role test_role;
-internal error: administrative command is unsupported in transactions
+internal error: there is no role test_role
 drop account test_account;
 internal error: do not have privilege to execute the statement
 drop database db1;
-internal error: CREATE/DROP of database is not supported in transactions
 create database db2;
-internal error: CREATE/DROP of database is not supported in transactions
 create table table_2(
 col1 int,
 col2 varchar
@@ -188,13 +185,11 @@ drop index index_table_2 on table_2;
 drop view view_2;
 drop table table_2;
 drop database db2;
-internal error: CREATE/DROP of database is not supported in transactions
 select * from unnest('{"a":1}') as f;
 col    seq    key    path    index    value    this
 UNNEST_DEFAULT    0    a    $.a    null    1    {"a": 1}
 prepare s1 from select * from test_table where col1=?;
 set @a=2;
-internal error: Uncommitted transaction exists. Please commit or rollback first.
 execute s1 using @a;
 col1    col2
 2    b
@@ -363,6 +358,7 @@ column_0    column_1
 /* cloud_user */ update test_table set col2='xxx' where col1=1;
 /* cloud_user */ delete from test_table where col1=3;
 /* cloud_user */ create account test_account admin_name = 'test_name' identified by '111' open comment 'tenant_test';
+internal error: the tenant test_account exists
 /* cloud_user */ create role test_role;
 /* cloud_user */ create user user_name identified by 'password';
 /* cloud_user */ create database if not exists db1;
