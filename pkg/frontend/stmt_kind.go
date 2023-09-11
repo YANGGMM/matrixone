@@ -201,9 +201,9 @@ func statementCanBeExecutedInUncommittedTransaction(ses *Session, stmt tree.Stat
 				USE ROLE role;
 		*/
 		return !st.IsUseRole(), nil
-	case *tree.DropTable, *tree.DropIndex, *tree.DropView, *tree.TruncateTable:
+	case *tree.DropDatabase, *tree.DropTable, *tree.DropIndex, *tree.DropView, *tree.TruncateTable:
 		return true, nil
-	case *tree.DropDatabase, *tree.DropSequence: //Case1, Case3 above
+	case *tree.DropSequence: //Case1, Case3 above
 		//background transaction can execute the DROPxxx in one transaction
 		return ses.IsBackgroundSession() || !ses.OptionBitsIsSet(OPTION_BEGIN), nil
 	}
