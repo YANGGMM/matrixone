@@ -26,6 +26,10 @@ type CreateView struct {
 func (node *CreateView) Format(ctx *FmtCtx) {
 	ctx.WriteString("create ")
 
+	if node.Replace {
+		ctx.WriteString("or replace ")
+	}
+
 	ctx.WriteString("view ")
 
 	if node.IfNotExists {
