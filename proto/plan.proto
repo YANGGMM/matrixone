@@ -1177,6 +1177,9 @@ message DropSequence {
 }
 
 message AlterSequence {
+	bool if_not_exists		=1;
+	string database 		=2;
+	TableDef table_def 		=3;
 }
 
 message CreateIndex {
