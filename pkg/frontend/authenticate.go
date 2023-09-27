@@ -4130,14 +4130,6 @@ func doDropAccount(ctx context.Context, ses *Session, da *tree.DropAccount) (err
 			}
 		}
 
-		// delete all publications
-
-		err = bh.Exec(deleteCtx, deleteMoPubsSql)
-
-		if err != nil {
-			return err
-		}
-
 		//drop databases created by user
 		databases = make(map[string]int8)
 		dbSql = "show databases;"
