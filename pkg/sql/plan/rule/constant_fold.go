@@ -117,7 +117,7 @@ func (r *ConstantFold) constantFold(e *plan.Expr, proc *process.Process) *plan.E
 	if f.CannotFold() { // function cannot be fold
 		return e
 	}
-	if f.IsRealTimeRelated() && !r.isPrepared {
+	if f.IsRealTimeRelated() || r.isPrepared {
 		return e
 	}
 	for i := range ef.F.Args {

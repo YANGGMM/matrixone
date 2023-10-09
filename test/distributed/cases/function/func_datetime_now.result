@@ -4,10 +4,17 @@ true
 create table t1(a timestamp,b int auto_increment);
 prepare s1 from 'insert into t1(a) select now()';
 execute s1;
+select sleep(1);
+sleep(1)
+0
 execute s1;
+select * from t1;
+a    b
+2023-10-09 09:50:20    1
+2023-10-09 09:50:21    2
 select t1.a=t2.a from t1,(select a from t1  where b=2)as t2 where b=1;
 t1.a = t2.a
-true
+false
 delete from t1;
 deallocate prepare s1;
 prepare s1 from 'insert into t1(a,b) values(now(),?)';
