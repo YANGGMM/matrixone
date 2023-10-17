@@ -1,7 +1,7 @@
 drop sequence if exists s1;
-create sequence s1 as smallint increment by -10 minvalue 30 maxvalue 100 cycle; 
+create sequence s1 as smallint increment by -10 minvalue 30 maxvalue 100 cycle;
 select * from s1;
-last_seq_num    min_value    max_value    start_value    increment_value    cycle    is_called    
+last_seq_num    min_value    max_value    start_value    increment_value    cycle    is_called
 100    30    100    100    -10    true    false
 drop sequence if exists s1;
 create sequence s1 as bigint unsigned increment by -1000 maxvalue 300;
@@ -18,7 +18,7 @@ select nextval('序列');
 nextval(序列)
 1
 select nextval('s1'), currval('s1');
-nextval(s1)    nextval(s1)
+nextval(s1)    currval(s1)
 300    300
 create sequence s2;
 create table t1(a int);
