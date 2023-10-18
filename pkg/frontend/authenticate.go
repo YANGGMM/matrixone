@@ -3530,6 +3530,25 @@ func doCreateStage(ctx context.Context, ses *Session, cs *tree.CreateStage) erro
 			return err
 		}
 	} else {
+		// format url in '$...' format
+		if strings.HasPrefix(cs.Url, "$") {
+			ep := &tree.ExternParam{
+				ExParamConst: tree.ExParamConst{
+					Filepath:     cs.Url,
+					CompressType: tree.AUTO,
+					Format:       tree.CSV,
+				},
+			}
+			ep.Ctx = ctx
+			fileList, _, err := plan2.ReadDir(ep)
+			if err != nil {
+				return err
+			}
+			if len(fileList) == 0 {
+				return moerr.NewInternalError(ctx, "the filepath does not exist in path flow")
+			}
+			cs.Url = fileList[0]
+		}
 		// format credentials and hash it
 		credentials = HashPassWord(formatCredentials(cs.Credentials))
 
