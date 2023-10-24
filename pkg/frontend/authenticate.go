@@ -23,6 +23,7 @@ import (
 	"math"
 	"math/bits"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1029,7 +1030,7 @@ var (
 				stage_status varchar(64),
 				created_time timestamp,
 				comment text,
-				primary key(stage_id)
+				primary key(stage_id, stage_name)
 			);`,
 		`CREATE VIEW IF NOT EXISTS mo_sessions AS SELECT * FROM mo_sessions() AS mo_sessions_tmp;`,
 		`CREATE VIEW IF NOT EXISTS mo_configurations AS SELECT * FROM mo_configurations() AS mo_configurations_tmp;`,
@@ -1492,6 +1493,8 @@ const (
 
 	checkStageStatusWithStageNameFormat = `select url, stage_status from mo_catalog.mo_stages where stage_name = "%s";`
 
+	getStageInfoWithStageNameAndStatusFormat = `select url, stage_credentials from mo_catalog.mo_stages where stage_name = "%s" and stage_status = 'enabled';`
+
 	dropStageFormat = `delete from mo_catalog.mo_stages where stage_name = '%s';`
 
 	updateStageUrlFotmat = `update mo_catalog.mo_stages set url = '%s'  where stage_name = '%s';`
@@ -1582,6 +1585,14 @@ func getSqlForCheckStageStatusWithStageName(ctx context.Context, stage string) (
 		return "", err
 	}
 	return fmt.Sprintf(checkStageStatusWithStageNameFormat, stage), nil
+}
+
+func getSqlForGetStageInfoWithStageNameAndStatus(ctx context.Context, stage string) (string, error) {
+	err := inputNameIsInvalid(ctx, stage)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(getStageInfoWithStageNameAndStatusFormat, stage), nil
 }
 
 func getSqlForInsertIntoMoStages(ctx context.Context, stageName, url, credentials, status, createdTime, comment string) string {
@@ -3483,14 +3494,15 @@ func checkStageExistOrNot(ctx context.Context, bh BackgroundExec, stageName stri
 	return false, nil
 }
 
-func formatCredentials(credentials tree.StageCredentials) string {
+func formatCredentials(cd tree.StageCredentials) string {
 	var rstr string
-	if credentials.Exist {
-		for i := 0; i < len(credentials.Credentials)-1; i += 2 {
-			rstr += fmt.Sprintf("%s=%s", credentials.Credentials[i], credentials.Credentials[i+1])
-			if i != len(credentials.Credentials)-2 {
-				rstr += ","
+	if cd.Exist {
+		for i := 0; i < len(cd.Credentials); i++ {
+			rstr += cd.Credentials[i]
+			if i == len(cd.Credentials)-1 {
+				break
 			}
+			rstr += ","
 		}
 	}
 	return rstr
@@ -3535,7 +3547,7 @@ func doCreateStage(ctx context.Context, ses *Session, cs *tree.CreateStage) erro
 		}
 	} else {
 		// format credentials and hash it
-		credentials = HashPassWord(formatCredentials(cs.Credentials))
+		credentials = formatCredentials(cs.Credentials)
 
 		if !cs.Status.Exist {
 			StageStatus = "disabled"
@@ -3716,7 +3728,7 @@ func doAlterStage(ctx context.Context, ses *Session, as *tree.AlterStage) error 
 		}
 
 		if as.CredentialsOption.Exist {
-			credentials = HashPassWord(formatCredentials(as.CredentialsOption))
+			credentials = formatCredentials(as.CredentialsOption)
 			sql = getsqlForUpdateStageCredentials(string(as.Name), credentials)
 			err = bh.Exec(ctx, sql)
 			if err != nil {
@@ -3785,6 +3797,88 @@ func doDropStage(ctx context.Context, ses *Session, ds *tree.DropStage) error {
 		}
 	}
 	return err
+}
+
+func doStageExchangeForLoad(ctx context.Context, ses *Session, ep *tree.ExternParam) error {
+	var err error
+	var sql string
+	var erArray []ExecResult
+	var url string
+	var credentials string
+	var isS3Param bool
+	var bucket string
+	var filePath string
+	var options []string
+	if len(ep.ExParamConst.StageName) == 0 {
+		return err
+	}
+
+	stageName := ep.ExParamConst.StageName
+
+	// check stage exists with enable status
+	sql, err = getSqlForGetStageInfoWithStageNameAndStatus(ctx, string(stageName))
+	if err != nil {
+		return err
+	}
+
+	bh := ses.GetBackgroundExec(ctx)
+	defer bh.Close()
+
+	err = bh.Exec(ctx, "begin;")
+	defer func() {
+		err = finishTxn(ctx, bh, err)
+	}()
+	if err != nil {
+		return err
+	}
+
+	bh.ClearExecResultSet()
+	err = bh.Exec(ctx, sql)
+	if err != nil {
+		return err
+	}
+	erArray, err = getResultSet(ctx, bh)
+	if err != nil {
+		return err
+	}
+	if !execResultArrayHasData(erArray) {
+		return moerr.NewInternalError(ctx, "stage '%s' does not exist", string(stageName))
+	}
+
+	url, err = erArray[0].GetString(ctx, 0, 0)
+	if err != nil {
+		return err
+	}
+
+	credentials, err = erArray[0].GetString(ctx, 0, 1)
+	if err != nil {
+		return err
+	}
+
+	isS3Param, err = doCheckStagePattern(url)
+	if err != nil {
+		return nil
+	}
+	if !isS3Param {
+		return moerr.NewInternalError(ctx, "only support load from stage with s3 param")
+	}
+
+	bucket, filePath = doGetStageBucketAndFilePath(url)
+	options = append(options, "bucket", bucket, "filepath", filePath)
+	options = append(options, strings.Split(credentials, ",")...)
+	ep.ExParamConst.Option = options
+	ep.ExParamConst.ScanType = tree.S3
+
+	return err
+}
+
+func doCheckStagePattern(url string) (bool, error) {
+	return regexp.MatchString(`(?:[^:/]+://[^:/]+/\s*)([^/]+)(\/.*)`, url)
+}
+
+func doGetStageBucketAndFilePath(url string) (string, string) {
+	parts := strings.Split(url, "/")
+	return parts[2], parts[3]
 }
 
 func doCreatePublication(ctx context.Context, ses *Session, cp *tree.CreatePublication) (err error) {

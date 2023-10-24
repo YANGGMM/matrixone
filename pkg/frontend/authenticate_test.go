@@ -9305,7 +9305,7 @@ func TestFormatCredentials(t *testing.T) {
 			Credentials: []string{"AWS_KEY_ID", "1a2b3c"},
 		}
 		rstr := formatCredentials(ta)
-		testRstr := "AWS_KEY_ID=1a2b3c"
+		testRstr := "AWS_KEY_ID,1a2b3c"
 		convey.So(rstr, convey.ShouldEqual, testRstr)
 	})
 
@@ -9315,8 +9315,307 @@ func TestFormatCredentials(t *testing.T) {
 			Credentials: []string{"AWS_KEY_ID", "1a2b3c", "AWS_SECRET_KEY", "4x5y6z"},
 		}
 		rstr := formatCredentials(ta)
-		testRstr := "AWS_KEY_ID=1a2b3c,AWS_SECRET_KEY=4x5y6z"
+		testRstr := "AWS_KEY_ID,1a2b3c,AWS_SECRET_KEY,4x5y6z"
 		convey.So(rstr, convey.ShouldEqual, testRstr)
+	})
+}
+
+func TestCheckStagePattern(t *testing.T) {
+	convey.Convey("doCheckStagePattern success", t, func() {
+		testUrl := "s3://load/encrypted_files/"
+		testRst, _ := doCheckStagePattern(testUrl)
+		convey.So(testRst, convey.ShouldBeTrue)
+	})
+
+	convey.Convey("doCheckStagePattern success", t, func() {
+		testUrl := "aliyun://load/encrypted_files/"
+		testRst, _ := doCheckStagePattern(testUrl)
+		convey.So(testRst, convey.ShouldBeTrue)
+	})
+
+	convey.Convey("doCheckStagePattern success", t, func() {
+		testUrl := "aliyun:/load/encrypted_files/"
+		testRst, _ := doCheckStagePattern(testUrl)
+		convey.So(testRst, convey.ShouldBeFalse)
+	})
+}
+
+func TestGetStageBucketAndFilePath(t *testing.T) {
+	convey.Convey("doGetStageBucketAndFilePath success", t, func() {
+		testUrl := "s3://load/encrypted_files/"
+		testBucket, testFilePath := doGetStageBucketAndFilePath(testUrl)
+		convey.So(testBucket, convey.ShouldEqual, "load")
+		convey.So(testFilePath, convey.ShouldEqual, "encrypted_files")
+	})
+
+	convey.Convey("doGetStageBucketAndFilePath success", t, func() {
+		testUrl := "aliyun://load/encrypted_files/"
+		testBucket, testFilePath := doGetStageBucketAndFilePath(testUrl)
+		convey.So(testBucket, convey.ShouldEqual, "load")
+		convey.So(testFilePath, convey.ShouldEqual, "encrypted_files")
+	})
+}
+
+func TestDoStageExchangeForLoad(t *testing.T) {
+	convey.Convey("doStageExchangeForLoad success", t, func() {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ses := newTestSession(t, ctrl)
+		defer ses.Close()
+
+		bh := &backgroundExecTest{}
+		bh.init()
+
+		bhStub := gostub.StubFunc(&NewBackgroundHandler, bh)
+		defer bhStub.Reset()
+
+		pu := config.NewParameterUnit(&config.FrontendParameters{}, nil, nil, nil)
+		pu.SV.SetDefaultValues()
+		ctx := context.WithValue(context.TODO(), config.ParameterUnitKey, pu)
+		aicm := &defines.AutoIncrCacheManager{}
+		rm, _ := NewRoutineManager(ctx, pu, aicm)
+		ses.rm = rm
+
+		tenant := &TenantInfo{
+			Tenant:        sysAccountName,
+			User:          rootName,
+			DefaultRole:   moAdminRoleName,
+			TenantID:      sysAccountID,
+			UserID:        rootID,
+			DefaultRoleID: moAdminRoleID,
+		}
+		ses.SetTenantInfo(tenant)
+
+		ep := &tree.ExternParam{
+			ExParamConst: tree.ExParamConst{
+				StageName: "",
+			},
+		}
+
+		//no result set
+		bh.sql2result["begin;"] = nil
+		bh.sql2result["commit;"] = nil
+		bh.sql2result["rollback;"] = nil
+
+		sql, _ := getSqlForGetStageInfoWithStageNameAndStatus(ctx, string(ep.ExParamConst.StageName))
+		mrs := newMrsForPasswordOfUser([][]interface{}{})
+		bh.sql2result[sql] = mrs
+
+		err := doStageExchangeForLoad(ctx, ses, ep)
+		convey.So(err, convey.ShouldBeNil)
+	})
+
+	convey.Convey("doStageExchangeForLoad fail", t, func() {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ses := newTestSession(t, ctrl)
+		defer ses.Close()
+
+		bh := &backgroundExecTest{}
+		bh.init()
+
+		bhStub := gostub.StubFunc(&NewBackgroundHandler, bh)
+		defer bhStub.Reset()
+
+		pu := config.NewParameterUnit(&config.FrontendParameters{}, nil, nil, nil)
+		pu.SV.SetDefaultValues()
+		ctx := context.WithValue(context.TODO(), config.ParameterUnitKey, pu)
+		aicm := &defines.AutoIncrCacheManager{}
+		rm, _ := NewRoutineManager(ctx, pu, aicm)
+		ses.rm = rm
+
+		tenant := &TenantInfo{
+			Tenant:        sysAccountName,
+			User:          rootName,
+			DefaultRole:   moAdminRoleName,
+			TenantID:      sysAccountID,
+			UserID:        rootID,
+			DefaultRoleID: moAdminRoleID,
+		}
+		ses.SetTenantInfo(tenant)
+
+		ep := &tree.ExternParam{
+			ExParamConst: tree.ExParamConst{
+				StageName: "my_stage",
+			},
+		}
+
+		//no result set
+		bh.sql2result["begin;"] = nil
+		bh.sql2result["commit;"] = nil
+		bh.sql2result["rollback;"] = nil
+
+		sql, _ := getSqlForGetStageInfoWithStageNameAndStatus(ctx, string(ep.ExParamConst.StageName))
+		mrs := newMrsForPasswordOfUser([][]interface{}{})
+		bh.sql2result[sql] = mrs
+
+		err := doStageExchangeForLoad(ctx, ses, ep)
+		convey.So(err, convey.ShouldNotBeNil)
+	})
+
+	convey.Convey("doStageExchangeForLoad success", t, func() {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ses := newTestSession(t, ctrl)
+		defer ses.Close()
+
+		bh := &backgroundExecTest{}
+		bh.init()
+
+		bhStub := gostub.StubFunc(&NewBackgroundHandler, bh)
+		defer bhStub.Reset()
+
+		pu := config.NewParameterUnit(&config.FrontendParameters{}, nil, nil, nil)
+		pu.SV.SetDefaultValues()
+		ctx := context.WithValue(context.TODO(), config.ParameterUnitKey, pu)
+		aicm := &defines.AutoIncrCacheManager{}
+		rm, _ := NewRoutineManager(ctx, pu, aicm)
+		ses.rm = rm
+
+		tenant := &TenantInfo{
+			Tenant:        sysAccountName,
+			User:          rootName,
+			DefaultRole:   moAdminRoleName,
+			TenantID:      sysAccountID,
+			UserID:        rootID,
+			DefaultRoleID: moAdminRoleID,
+		}
+		ses.SetTenantInfo(tenant)
+
+		ep := &tree.ExternParam{
+			ExParamConst: tree.ExParamConst{
+				StageName: "my_stage",
+			},
+		}
+
+		//no result set
+		bh.sql2result["begin;"] = nil
+		bh.sql2result["commit;"] = nil
+		bh.sql2result["rollback;"] = nil
+
+		sql, _ := getSqlForGetStageInfoWithStageNameAndStatus(ctx, string(ep.ExParamConst.StageName))
+		mrs := newMrsForPasswordOfUser([][]interface{}{
+			{"aliyun://load/encrypted_files/", "role_arn,arn:aws:iam::468413122987:role/dev-cross-s3,external_id,5404f91c_4e59_4898_85b3,compression,auto"},
+		})
+		bh.sql2result[sql] = mrs
+
+		err := doStageExchangeForLoad(ctx, ses, ep)
+		convey.So(err, convey.ShouldBeNil)
+	})
+
+	convey.Convey("doStageExchangeForLoad fail", t, func() {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ses := newTestSession(t, ctrl)
+		defer ses.Close()
+
+		bh := &backgroundExecTest{}
+		bh.init()
+
+		bhStub := gostub.StubFunc(&NewBackgroundHandler, bh)
+		defer bhStub.Reset()
+
+		pu := config.NewParameterUnit(&config.FrontendParameters{}, nil, nil, nil)
+		pu.SV.SetDefaultValues()
+		ctx := context.WithValue(context.TODO(), config.ParameterUnitKey, pu)
+		aicm := &defines.AutoIncrCacheManager{}
+		rm, _ := NewRoutineManager(ctx, pu, aicm)
+		ses.rm = rm
+
+		tenant := &TenantInfo{
+			Tenant:        sysAccountName,
+			User:          rootName,
+			DefaultRole:   moAdminRoleName,
+			TenantID:      sysAccountID,
+			UserID:        rootID,
+			DefaultRoleID: moAdminRoleID,
+		}
+		ses.SetTenantInfo(tenant)
+
+		ep := &tree.ExternParam{
+			ExParamConst: tree.ExParamConst{
+				StageName: "my_stage",
+			},
+		}
+
+		//no result set
+		bh.sql2result["begin;"] = nil
+		bh.sql2result["commit;"] = nil
+		bh.sql2result["rollback;"] = nil
+
+		sql, _ := getSqlForGetStageInfoWithStageNameAndStatus(ctx, string(ep.ExParamConst.StageName))
+		mrs := newMrsForPasswordOfUser([][]interface{}{
+			{"aliyun:/load/encrypted_files/", "role_arn,arn:aws:iam::468413122987:role/dev-cross-s3,external_id,5404f91c_4e59_4898_85b3,compression,auto"},
+		})
+		bh.sql2result[sql] = mrs
+
+		err := doStageExchangeForLoad(ctx, ses, ep)
+		convey.So(err, convey.ShouldNotBeNil)
+	})
+
+	convey.Convey("doStageExchangeForLoad success", t, func() {
+		ctrl := gomock.NewController(t)
+		defer ctrl.Finish()
+
+		ses := newTestSession(t, ctrl)
+		defer ses.Close()
+
+		bh := &backgroundExecTest{}
+		bh.init()
+
+		bhStub := gostub.StubFunc(&NewBackgroundHandler, bh)
+		defer bhStub.Reset()
+
+		pu := config.NewParameterUnit(&config.FrontendParameters{}, nil, nil, nil)
+		pu.SV.SetDefaultValues()
+		ctx := context.WithValue(context.TODO(), config.ParameterUnitKey, pu)
+		aicm := &defines.AutoIncrCacheManager{}
+		rm, _ := NewRoutineManager(ctx, pu, aicm)
+		ses.rm = rm
+
+		tenant := &TenantInfo{
+			Tenant:        sysAccountName,
+			User:          rootName,
+			DefaultRole:   moAdminRoleName,
+			TenantID:      sysAccountID,
+			UserID:        rootID,
+			DefaultRoleID: moAdminRoleID,
+		}
+		ses.SetTenantInfo(tenant)
+
+		ep := &tree.ExternParam{
+			ExParamConst: tree.ExParamConst{
+				StageName: "my_stage",
+			},
+		}
+
+		//no result set
+		bh.sql2result["begin;"] = nil
+		bh.sql2result["commit;"] = nil
+		bh.sql2result["rollback;"] = nil
+
+		sql, _ := getSqlForGetStageInfoWithStageNameAndStatus(ctx, string(ep.ExParamConst.StageName))
+		mrs := newMrsForPasswordOfUser([][]interface{}{
+			{"aliyun://load/encrypted_files/", "role_arn,arn:aws:iam::468413122987:role/dev-cross-s3,external_id,5404f91c_4e59_4898_85b3,compression,auto"},
+		})
+		bh.sql2result[sql] = mrs
+
+		err := doStageExchangeForLoad(ctx, ses, ep)
+		convey.So(err, convey.ShouldBeNil)
+
+		testEp := &tree.ExternParam{
+			ExParamConst: tree.ExParamConst{
+				StageName: "my_stage",
+				Option:    []string{"bucket", "load", "filepath", "encrypted_files", "role_arn", "arn:aws:iam::468413122987:role/dev-cross-s3", "external_id", "5404f91c_4e59_4898_85b3", "compression", "auto"},
+				ScanType:  tree.S3,
+			},
+		}
+
+		convey.So(ep.ExParamConst.Option, convey.ShouldResemble, testEp.ExParamConst.Option)
 	})
 }
 
