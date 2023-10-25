@@ -3193,6 +3193,12 @@ func (mce *MysqlCmdExecutor) executeStmt(requestCtx context.Context,
 		if st.Local {
 			proc.LoadLocalReader, loadLocalWriter = io.Pipe()
 		}
+		if len(st.Param.ExParamConst.StageName) != 0 {
+			err = doStageExchangeForLoad(requestCtx, ses, st.Param)
+			if err != nil {
+				return
+			}
+		}
 	case *tree.ShowBackendServers:
 		selfHandle = true
 		if err = mce.handleShowBackendServers(requestCtx, i, len(cws)); err != nil {
