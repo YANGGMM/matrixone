@@ -2855,16 +2855,22 @@ func (mce *MysqlCmdExecutor) executeStmt(requestCtx context.Context,
 			return
 		}
 		RecordStatementTxnID(requestCtx, ses)
+		ses.SetSendCleanCahce(false)
 	case *tree.CommitTransaction:
 		err = ses.TxnCommit()
 		if err != nil {
 			return
 		}
+		if ses.GetSendCleanCahce() {
+			ses.cleanCache4OtherSessions()
+		}
+		ses.SetSendCleanCahce(false)
 	case *tree.RollbackTransaction:
 		err = ses.TxnRollback()
 		if err != nil {
 			return
 		}
+		ses.SetSendCleanCahce(false)
 	}
 
 	switch st := stmt.(type) {
@@ -3671,12 +3677,10 @@ func (mce *MysqlCmdExecutor) doComQuery(requestCtx context.Context, input *UserI
 
 	for i, cw := range cws {
 		if cwft, ok := cw.(*TxnComputationWrapper); ok {
-			if cwft.stmt.GetQueryType() == tree.QueryTypeDDL || cwft.stmt.GetQueryType() == tree.QueryTypeDCL ||
-				cwft.stmt.GetQueryType() == tree.QueryTypeOth ||
-				cwft.stmt.GetQueryType() == tree.QueryTypeTCL {
-				if _, ok := cwft.stmt.(*tree.SetVar); !ok {
-					ses.cleanCache()
-				}
+			queryType := cwft.stmt.GetQueryType()
+			switch queryType {
+			case tree.QueryTypeDDL, tree.QueryTypeDCL, tree.QueryTypeOth, tree.QueryTypeTCL:
+				mce.handleStatementCache(ses, cwft)
 				canCache = false
 			}
 		}
@@ -4330,4 +4334,24 @@ func (h *marshalPlanHandler) Stats(ctx context.Context) (statsByte statistic.Sta
 		statsByte = statistic.DefaultStatsArray
 	}
 	return
+}
+
+func (mce *MysqlCmdExecutor) handleStatementCache(ses *Session, cwft *TxnComputationWrapper) {
+	if _, ok := cwft.stmt.(*tree.SetVar); !ok {
+		ses.cleanCache()
+		if _, ok := cwft.stmt.(*tree.AlterTable); ok {
+			if ses.ServerStatusIsSet(SERVER_STATUS_IN_TRANS) {
+				ses.SetSendCleanCahce(true)
+			} else {
+				ses.cleanCache4OtherSessions()
+			}
+		}
+		if _, ok := cwft.stmt.(*tree.AlterView); ok {
+			if ses.ServerStatusIsSet(SERVER_STATUS_IN_TRANS) {
+				ses.SetSendCleanCahce(true)
+			} else {
+				ses.cleanCache4OtherSessions()
+			}
+		}
+	}
 }

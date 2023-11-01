@@ -42,7 +42,7 @@ func (node *CreateStage) Format(ctx *FmtCtx) {
 }
 
 func (node *CreateStage) GetStatementType() string { return "Create Stage" }
-func (node *CreateStage) GetQueryType() string     { return QueryTypeOth }
+func (node *CreateStage) GetQueryType() string     { return QueryTypeDCL }
 
 type DropStage struct {
 	statementImpl
@@ -59,7 +59,7 @@ func (node *DropStage) Format(ctx *FmtCtx) {
 }
 
 func (node *DropStage) GetStatementType() string { return "Drop Stage" }
-func (node *DropStage) GetQueryType() string     { return QueryTypeOth }
+func (node *DropStage) GetQueryType() string     { return QueryTypeDCL }
 
 type AlterStage struct {
 	statementImpl
@@ -85,7 +85,7 @@ func (node *AlterStage) Format(ctx *FmtCtx) {
 }
 
 func (node *AlterStage) GetStatementType() string { return "Alter Stage" }
-func (node *AlterStage) GetQueryType() string     { return QueryTypeOth }
+func (node *AlterStage) GetQueryType() string     { return QueryTypeDCL }
 
 type StageStatusOption int
 
@@ -179,4 +179,4 @@ func (node *ShowStages) Format(ctx *FmtCtx) {
 	}
 }
 func (node *ShowStages) GetStatementType() string { return "Show Stages" }
-func (node *ShowStages) GetQueryType() string     { return QueryTypeOth }
+func (node *ShowStages) GetQueryType() string     { return QueryTypeDCL }

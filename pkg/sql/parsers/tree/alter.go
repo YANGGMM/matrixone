@@ -170,7 +170,7 @@ func (node *AlterDataBaseConfig) Format(ctx *FmtCtx) {
 }
 
 func (node *AlterDataBaseConfig) GetStatementType() string { return "Alter DataBase config" }
-func (node *AlterDataBaseConfig) GetQueryType() string     { return QueryTypeDDL }
+func (node *AlterDataBaseConfig) GetQueryType() string     { return QueryTypeDCL }
 
 // AlterTable
 // see https://dev.mysql.com/doc/refman/8.0/en/alter-table.html

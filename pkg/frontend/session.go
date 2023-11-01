@@ -251,6 +251,8 @@ type Session struct {
 	queryInProgress atomic.Bool
 	// queryInExecute indicates whether the query is in execute
 	queryInExecute atomic.Bool
+	// sendCleanCache indicates whether send clean cache to other session
+	sendCleanCahce atomic.Bool
 }
 
 func (ses *Session) ClearStmtProfile() {
@@ -337,6 +339,14 @@ func (ses *Session) SetQueryInExecute(b bool) {
 
 func (ses *Session) GetQueryInExecute() bool {
 	return ses.queryInExecute.Load()
+}
+
+func (ses *Session) SetSendCleanCahce(b bool) {
+	ses.sendCleanCahce.Store(b)
+}
+
+func (ses *Session) GetSendCleanCahce() bool {
+	return ses.sendCleanCahce.Load()
 }
 
 func (ses *Session) SetSqlOfStmt(sot string) {
@@ -2254,6 +2264,20 @@ func (ses *Session) SetSessionRoutineStatus(status string) error {
 		err = moerr.NewInternalErrorNoCtx("SetSessionRoutineStatus have invalid status : %s", status)
 	}
 	return err
+}
+
+func (ses *Session) cleanCache4OtherSessions() {
+	rt := ses.getRoutineManager()
+	if rt != nil {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		for _, routine := range rt.clients {
+			rtSession := routine.getSession()
+			if rtSession != nil {
+				rtSession.cleanCache()
+			}
+		}
+	}
 }
 
 func checkPlanIsInsertValues(proc *process.Process,
