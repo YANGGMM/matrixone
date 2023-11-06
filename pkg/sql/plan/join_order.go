@@ -214,8 +214,8 @@ func (builder *QueryBuilder) determineJoinOrder(nodeID int32) int32 {
 	}
 
 	leaves, conds := builder.gatherJoinLeavesAndConds(node, nil, nil)
-	newConds := deduceNewOnList(conds)
-	conds = append(conds, newConds...)
+	// newConds := deduceNewOnList(conds)
+	// conds = append(conds, newConds...)
 	vertices := builder.getJoinGraph(leaves, conds)
 
 	subTrees := make([]*plan.Node, 0, len(leaves))
