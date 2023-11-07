@@ -121,6 +121,9 @@ func (builder *QueryBuilder) IsEquiJoin(node *plan.Node) bool {
 		rightTags[tag] = nil
 	}
 
+	if len(node.OnList) == 0 {
+		return false
+	}
 	for _, expr := range node.OnList {
 		if equi := isEquiCond(expr, leftTags, rightTags); !equi {
 			return false
