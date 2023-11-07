@@ -122,11 +122,11 @@ func (builder *QueryBuilder) IsEquiJoin(node *plan.Node) bool {
 	}
 
 	for _, expr := range node.OnList {
-		if equi := isEquiCond(expr, leftTags, rightTags); equi {
-			return true
+		if equi := isEquiCond(expr, leftTags, rightTags); !equi {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func isEquiCond(expr *plan.Expr, leftTags, rightTags map[int32]any) bool {
