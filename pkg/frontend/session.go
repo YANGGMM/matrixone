@@ -559,6 +559,7 @@ func NewSession(proto Protocol, mp *mpool.MPool, pu *config.ParameterUnit,
 	ses.GetTxnCompileCtx().SetSession(ses)
 	ses.GetTxnHandler().SetSession(ses)
 	ses.SetAutoIncrCacheManager(aicm)
+	ses.SetQueryInExecute(true)
 
 	var err error
 	if ses.mp == nil {
