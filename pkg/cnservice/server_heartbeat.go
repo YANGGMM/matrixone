@@ -18,10 +18,10 @@ import (
 	"context"
 	"time"
 
-	metricv2 "github.com/matrixorigin/matrixone/pkg/util/metric/v2"
-
+	"github.com/matrixorigin/matrixone/pkg/common/system"
 	"github.com/matrixorigin/matrixone/pkg/logutil"
 	logservicepb "github.com/matrixorigin/matrixone/pkg/pb/logservice"
+	v2 "github.com/matrixorigin/matrixone/pkg/util/metric/v2"
 	"go.uber.org/zap"
 )
 
@@ -65,7 +65,7 @@ func (s *service) heartbeatTask(ctx context.Context) {
 func (s *service) heartbeat(ctx context.Context) {
 	start := time.Now()
 	defer func() {
-		metricv2.HeartbeatHistogram.WithLabelValues("cn").Observe(time.Since(start).Seconds())
+		v2.CNHeartbeatHistogram.Observe(time.Since(start).Seconds())
 	}()
 
 	ctx2, cancel := context.WithTimeout(ctx, s.cfg.HAKeeper.HeatbeatTimeout.Duration)
@@ -76,7 +76,6 @@ func (s *service) heartbeat(ctx context.Context) {
 		ServiceAddress:     s.pipelineServiceServiceAddr(),
 		SQLAddress:         s.cfg.SQLAddress,
 		LockServiceAddress: s.lockServiceServiceAddr(),
-		CtlAddress:         s.ctlServiceServiceAddr(),
 		Role:               s.metadata.Role,
 		TaskServiceCreated: s.GetTaskRunner() != nil,
 		QueryAddress:       s.queryServiceServiceAddr(),
@@ -84,11 +83,17 @@ func (s *service) heartbeat(ctx context.Context) {
 		GossipAddress:      s.gossipServiceAddr(),
 		GossipJoined:       s.gossipNode.Joined(),
 		ConfigData:         s.config.GetData(),
+		Resource: logservicepb.Resource{
+			CPUTotal:     uint64(system.NumCPU()),
+			CPUAvailable: system.CPUAvailable(),
+			MemTotal:     system.MemoryTotal(),
+			MemAvailable: system.MemoryAvailable(),
+		},
 	}
 
 	cb, err := s._hakeeperClient.SendCNHeartbeat(ctx2, hb)
 	if err != nil {
-		metricv2.HeartbeatFailureCounter.WithLabelValues("cn").Inc()
+		v2.CNHeartbeatFailureCounter.Inc()
 		s.logger.Error("failed to send cn heartbeat", zap.Error(err))
 		return
 	}

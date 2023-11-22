@@ -27,6 +27,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
+	"github.com/matrixorigin/matrixone/pkg/sql/plan/function"
 )
 
 type MockCompilerContext struct {
@@ -46,8 +47,8 @@ func (m *MockCompilerContext) CheckSubscriptionValid(subName, accName string, pu
 	panic("implement me")
 }
 
-func (m *MockCompilerContext) ResolveUdf(name string, ast []*plan.Expr) (string, error) {
-	return "", nil
+func (m *MockCompilerContext) ResolveUdf(name string, ast []*plan.Expr) (*function.Udf, error) {
+	return nil, nil
 }
 
 func (m *MockCompilerContext) ResolveAccountIds(accountNames []string) ([]uint32, error) {
@@ -376,6 +377,9 @@ func NewMockCompilerContext(isDml bool) *MockCompilerContext {
 			{"database_id", types.T_uint64, false, 100, 0},
 			{"name", types.T_varchar, false, 64, 0},
 			{"type", types.T_varchar, false, 11, 0},
+			{"algo", types.T_varchar, false, 11, 0},
+			{"algo_table_type", types.T_varchar, false, 11, 0},
+			{"algo_params", types.T_varchar, false, 2048, 0},
 			{"is_visible", types.T_int8, false, 50, 0},
 			{"hidden", types.T_int8, false, 50, 0},
 			{"comment", types.T_varchar, false, 2048, 0},
@@ -806,7 +810,7 @@ func (m *MockCompilerContext) GetUserName() string {
 
 func (m *MockCompilerContext) Resolve(dbName string, tableName string) (*ObjectRef, *TableDef) {
 	name := strings.ToLower(tableName)
-	tableDef := DeepCopyTableDef(m.tables[name])
+	tableDef := DeepCopyTableDef(m.tables[name], true)
 	if tableDef != nil && !m.isDml {
 		for i, col := range tableDef.Cols {
 			if col.Typ.Id == int32(types.T_Rowid) {
@@ -828,7 +832,7 @@ func (m *MockCompilerContext) Resolve(dbName string, tableName string) (*ObjectR
 
 func (m *MockCompilerContext) ResolveById(tableId uint64) (*ObjectRef, *TableDef) {
 	name := m.id2name[tableId]
-	tableDef := DeepCopyTableDef(m.tables[name])
+	tableDef := DeepCopyTableDef(m.tables[name], true)
 	if tableDef != nil && !m.isDml {
 		for i, col := range tableDef.Cols {
 			if col.Typ.Id == int32(types.T_Rowid) {

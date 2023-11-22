@@ -42,6 +42,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/perfcounter"
 	"github.com/matrixorigin/matrixone/pkg/proxy"
 	"github.com/matrixorigin/matrixone/pkg/tnservice"
+	"github.com/matrixorigin/matrixone/pkg/udf/pythonservice"
 	"github.com/matrixorigin/matrixone/pkg/util/metric/stats"
 	tomlutil "github.com/matrixorigin/matrixone/pkg/util/toml"
 	"github.com/matrixorigin/matrixone/pkg/version"
@@ -53,10 +54,11 @@ var (
 	defaultMemoryLimit    = 1 << 40
 
 	supportServiceTypes = map[string]metadata.ServiceType{
-		metadata.ServiceType_CN.String():    metadata.ServiceType_CN,
-		metadata.ServiceType_TN.String():    metadata.ServiceType_TN,
-		metadata.ServiceType_LOG.String():   metadata.ServiceType_LOG,
-		metadata.ServiceType_PROXY.String(): metadata.ServiceType_PROXY,
+		metadata.ServiceType_CN.String():         metadata.ServiceType_CN,
+		metadata.ServiceType_TN.String():         metadata.ServiceType_TN,
+		metadata.ServiceType_LOG.String():        metadata.ServiceType_LOG,
+		metadata.ServiceType_PROXY.String():      metadata.ServiceType_PROXY,
+		metadata.ServiceType_PYTHON_UDF.String(): metadata.ServiceType_PYTHON_UDF,
 	}
 )
 
@@ -70,6 +72,8 @@ type LaunchConfig struct {
 	CNServiceConfigsFiles []string `toml:"cnservices"`
 	// CNServiceConfigsFiles log service config files
 	ProxyServiceConfigsFiles []string `toml:"proxy-services"`
+	// PythonUdfServiceConfigsFiles python udf service config files
+	PythonUdfServiceConfigsFiles []string `toml:"python-udf-services"`
 	// Dynamic dynamic cn service config
 	Dynamic Dynamic `toml:"dynamic"`
 }
@@ -112,6 +116,8 @@ type Config struct {
 	CN cnservice.Config `toml:"cn"`
 	// ProxyConfig is the config of proxy.
 	ProxyConfig proxy.Config `toml:"proxy"`
+	// PythonUdfServerConfig is the config of python udf server
+	PythonUdfServerConfig pythonservice.Config `toml:"python-udf-server"`
 	// Observability parameters for the metric/trace
 	Observability config.ObservabilityParameters `toml:"observability"`
 
@@ -255,6 +261,20 @@ func (c *Config) setDefaultValue() error {
 	if c.Log.StacktraceLevel == "" {
 		c.Log.StacktraceLevel = zap.PanicLevel.String()
 	}
+	//set set default value
+	c.Log = logutil.GetDefaultConfig()
+	// HAKeeperClient has been set in NewConfig
+	if c.TN_please_use_getTNServiceConfig != nil {
+		c.TN_please_use_getTNServiceConfig.SetDefaultValue()
+	}
+	if c.TNCompatible != nil {
+		c.TNCompatible.SetDefaultValue()
+	}
+	// LogService has been set in NewConfig
+	c.CN.SetDefaultValue()
+	//no default proxy config
+	// Observability has been set in NewConfig
+	c.initMetaCache()
 	return nil
 }
 
@@ -270,18 +290,11 @@ func (c *Config) defaultFileServiceDataDir(name string) string {
 
 func (c *Config) createFileService(
 	ctx context.Context,
-	st metadata.ServiceType,
-	defaultName string,
-	perfCounterSet *perfcounter.CounterSet,
 	serviceType metadata.ServiceType,
 	nodeUUID string,
 ) (*fileservice.FileServices, error) {
 	// create all services
 	services := make([]fileservice.FileService, 0, len(c.FileServices))
-
-	if perfCounterSet.FileServiceByName == nil {
-		perfCounterSet.FileServiceByName = make(map[string]*perfcounter.CounterSet)
-	}
 
 	// default LOCAL fs
 	ok := false
@@ -347,7 +360,6 @@ func (c *Config) createFileService(
 			config,
 			[]*perfcounter.CounterSet{
 				counterSet,
-				perfCounterSet,
 			},
 		)
 		if err != nil {
@@ -356,17 +368,17 @@ func (c *Config) createFileService(
 		services = append(services, service)
 
 		// perf counter
-		counterSetName := strings.Join([]string{
+		counterSetName := perfcounter.NameForFileService(
 			serviceType.String(),
 			nodeUUID,
 			service.Name(),
-		}, " ")
-		perfCounterSet.FileServiceByName[counterSetName] = counterSet
+		)
+		perfcounter.Named.Store(counterSetName, counterSet)
 
 		// set shared fs perf counter as node perf counter
 		if service.Name() == defines.SharedFileServiceName {
 			perfcounter.Named.Store(
-				perfcounter.NameForNode(st.String(), nodeUUID),
+				perfcounter.NameForNode(serviceType.String(), nodeUUID),
 				counterSet,
 			)
 		}
@@ -379,15 +391,9 @@ func (c *Config) createFileService(
 
 	// create FileServices
 	fs, err := fileservice.NewFileServices(
-		defaultName,
+		"",
 		services...,
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	// validate default name
-	_, err = fileservice.Get[fileservice.FileService](fs, defaultName)
 	if err != nil {
 		return nil, err
 	}
@@ -570,15 +576,15 @@ func dumpCommonConfig(cfg Config) (map[string]*logservicepb.ConfigItem, error) {
 
 	//specific config items should be remoted
 	filters := []string{
-		"Config.TN_please_use_getTNServiceConfig",
-		"Config.TNCompatible",
-		"Config.LogService",
-		"Config.CN",
-		"Config.ProxyConfig",
+		"config.tn_please_use_gettnserviceconfig",
+		"config.tncompatible",
+		"config.logservice",
+		"config.cn",
+		"config.proxyconfig",
 	}
 
 	//denote the common for cn,tn,log or proxy
-	prefix := "Common"
+	prefix := "common"
 
 	newMap := make(map[string]*logservicepb.ConfigItem)
 	for s, item := range ret {

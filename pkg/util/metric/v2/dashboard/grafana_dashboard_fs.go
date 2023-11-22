@@ -17,39 +17,25 @@ package dashboard
 import (
 	"context"
 
+	"github.com/K-Phoen/grabana/axis"
 	"github.com/K-Phoen/grabana/dashboard"
-	"github.com/K-Phoen/grabana/variable/interval"
 )
 
 func (c *DashboardCreator) initFileServiceDashboard() error {
-	folder, err := c.createFolder(fsFolderName)
+	folder, err := c.createFolder(moFolderName)
 	if err != nil {
 		return err
 	}
 
 	build, err := dashboard.New(
-		"Logtail Status",
-		dashboard.AutoRefresh("5s"),
-		dashboard.VariableAsInterval(
-			"interval",
-			interval.Values([]string{"30s", "1m", "5m", "10m", "30m", "1h", "6h", "12h"}),
-		),
-		c.initFSReadOverviewRow(),
-		c.initFSWriteOverviewRow(),
-		c.initFSS3ReadDurationRow(),
-		c.initFSS3WriteDurationRow(),
-		c.initFSLocalReadDurationRow(),
-		c.initFSLocalWriteDurationRow(),
-		c.initFSS3ReadBytesRow(),
-		c.initFSS3WriteBytesRow(),
-		c.initFSLocalReadBytesRow(),
-		c.initFSLocalWriteBytesRow(),
-		c.initFSS3ConnectRequestsRow(),
-		c.initFSS3ConnectRow(),
-		c.initFSS3GetConnRow(),
-		c.initFSResolveS3DNSRow(),
-		c.initFSS3TLSHandshakeRow(),
-	)
+		"FileService Metrics",
+		c.withRowOptions(
+			c.initFSOverviewRow(),
+			c.initFSReadWriteDurationRow(),
+			c.initFSReadWriteBytesRow(),
+			c.initFSS3ConnOverviewRow(),
+			c.initFSS3ConnDurationRow(),
+		)...)
 	if err != nil {
 		return err
 	}
@@ -57,184 +43,120 @@ func (c *DashboardCreator) initFileServiceDashboard() error {
 	return err
 }
 
-func (c *DashboardCreator) initFSReadOverviewRow() dashboard.Option {
+func (c *DashboardCreator) initFSOverviewRow() dashboard.Option {
 	return dashboard.Row(
-		"FileService read overview",
-		c.withGraph(
+		"FileService Overview",
+		c.withMultiGraph(
 			"S3 Read requests",
-			3,
-			`sum(rate(mo_fs_read_total{type="s3"}[$interval]))`,
-			""),
+			6,
+			[]string{
+				`sum(rate(` + c.getMetricWithFilter("mo_fs_read_total", `type="s3"`) + `[$interval]))`,
+				`sum(rate(` + c.getMetricWithFilter("mo_fs_read_total", `type="hit-mem"`) + `[$interval]))`,
+				`sum(rate(` + c.getMetricWithFilter("mo_fs_read_total", `type="hit-disk"`) + `[$interval]))`,
+				`sum(rate(` + c.getMetricWithFilter("mo_fs_read_total", `type="hit-remote"`) + `[$interval]))`,
+			},
+			[]string{
+				"s3",
+				"hit-mem",
+				"hit-dist",
+				"hit-remote",
+			}),
 
-		c.withGraph(
-			"Mem Read requests",
-			3,
-			`sum(rate(mo_fs_read_total{type="hit-mem"}[$interval]))`,
-			""),
-
-		c.withGraph(
-			"Disk Read requests",
-			3,
-			`sum(rate(mo_fs_read_total{type="hit-disk"}[$interval]))`,
-			""),
-
-		c.withGraph(
-			"Remote Read requests",
-			3,
-			`sum(rate(mo_fs_read_total{type="hit-remote"}[$interval]))`,
-			""),
-	)
-}
-
-func (c *DashboardCreator) initFSWriteOverviewRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService write overview",
-		c.withGraph(
+		c.withMultiGraph(
 			"S3 Write requests",
 			6,
-			`sum(rate(mo_fs_write_total{type="s3"}[$interval]))`,
-			""),
-
-		c.withGraph(
-			"Local Write requests",
-			6,
-			`sum(rate(mo_fs_write_total{type="local"}[$interval]))`,
-			""),
+			[]string{
+				`sum(rate(` + c.getMetricWithFilter("mo_fs_write_total", `type="s3"`) + `[$interval]))`,
+				`sum(rate(` + c.getMetricWithFilter("mo_fs_write_total", `type="local"`) + `[$interval]))`,
+			},
+			[]string{
+				"s3",
+				"local",
+			}),
 	)
 }
 
-func (c *DashboardCreator) initFSS3ReadDurationRow() dashboard.Option {
+func (c *DashboardCreator) initFSReadWriteDurationRow() dashboard.Option {
 	return dashboard.Row(
-		"FileService S3 read duration",
-		c.getHistogram(
-			`mo_fs_s3_io_duration_seconds_bucket{type="read"}`,
+		"FileService read write duration",
+		c.getMultiHistogram(
+			[]string{
+				c.getMetricWithFilter(`mo_fs_s3_io_duration_seconds_bucket`, `type="read"`),
+				c.getMetricWithFilter(`mo_fs_s3_io_duration_seconds_bucket`, `type="write"`),
+				c.getMetricWithFilter(`mo_fs_local_io_duration_seconds_bucket`, `type="read"`),
+				c.getMetricWithFilter(`mo_fs_local_io_duration_seconds_bucket`, `type="write"`),
+			},
+			[]string{
+				"s3-read",
+				"s3-write",
+				"local-read",
+				"local-write",
+			},
 			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
+			[]float32{3, 3, 3, 3},
+			axis.Unit("s"),
+			axis.Min(0))...,
 	)
 }
 
-func (c *DashboardCreator) initFSS3WriteDurationRow() dashboard.Option {
+func (c *DashboardCreator) initFSReadWriteBytesRow() dashboard.Option {
 	return dashboard.Row(
-		"FileService S3 read duration",
-		c.getHistogram(
-			`mo_fs_s3_io_duration_seconds_bucket{type="write"}`,
+		"FileService read write bytes",
+		c.getMultiHistogram(
+			[]string{
+				c.getMetricWithFilter(`mo_fs_s3_io_bytes_bucket`, `type="read"`),
+				c.getMetricWithFilter(`mo_fs_s3_io_bytes_bucket`, `type="write"`),
+				c.getMetricWithFilter(`mo_fs_local_io_bytes_bucket`, `type="read"`),
+				c.getMetricWithFilter(`mo_fs_local_io_bytes_bucket`, `type="write"`),
+			},
+			[]string{
+				"s3-read",
+				"s3-write",
+				"local-read",
+				"local-write",
+			},
 			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
+			[]float32{3, 3, 3, 3},
+			axis.Unit("bytes"),
+			axis.Min(0))...,
 	)
 }
 
-func (c *DashboardCreator) initFSLocalReadDurationRow() dashboard.Option {
+func (c *DashboardCreator) initFSS3ConnOverviewRow() dashboard.Option {
 	return dashboard.Row(
-		"FileService local read duration",
-		c.getHistogram(
-			`mo_fs_local_io_duration_seconds_bucket{type="read"}`,
-			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
-	)
-}
-
-func (c *DashboardCreator) initFSLocalWriteDurationRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService local read duration",
-		c.getHistogram(
-			`mo_fs_local_io_duration_seconds_bucket{type="write"}`,
-			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
-	)
-}
-
-func (c *DashboardCreator) initFSS3ReadBytesRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService S3 read size",
-		c.getBytesHistogram(
-			`mo_fs_s3_io_bytes_bucket{type="read"}`,
-			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
-	)
-}
-
-func (c *DashboardCreator) initFSS3WriteBytesRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService S3 write size",
-		c.getBytesHistogram(
-			`mo_fs_s3_io_bytes_bucket{type="write"}`,
-			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
-	)
-}
-
-func (c *DashboardCreator) initFSLocalReadBytesRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService local read size",
-		c.getBytesHistogram(
-			`mo_fs_local_io_bytes_bucket{type="read"}`,
-			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
-	)
-}
-
-func (c *DashboardCreator) initFSLocalWriteBytesRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService local write size",
-		c.getBytesHistogram(
-			`mo_fs_local_io_bytes_bucket{type="write"}`,
-			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
-	)
-}
-
-func (c *DashboardCreator) initFSS3ConnectRequestsRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService S3 connection status",
+		"FileService S3 connection overview",
 		c.withGraph(
 			"Connect",
 			6,
-			`sum(rate(mo_fs_s3_conn_duration_seconds_count{type="connect"}[$interval]))`,
+			`sum(rate(`+c.getMetricWithFilter("mo_fs_s3_conn_duration_seconds_count", `type="connect"`)+`[$interval]))`,
 			""),
 		c.withGraph(
 			"DNS Resolve",
 			6,
-			`sum(rate(mo_fs_s3_conn_duration_seconds_count{type="dns-resolve"}[$interval]))`,
+			`sum(rate(`+c.getMetricWithFilter("mo_fs_s3_conn_duration_seconds_count", `type="dns-resolve"`)+`[$interval]))`,
 			""),
 	)
 }
 
-func (c *DashboardCreator) initFSS3ConnectRow() dashboard.Option {
+func (c *DashboardCreator) initFSS3ConnDurationRow() dashboard.Option {
 	return dashboard.Row(
-		"FileService connect to S3",
-		c.getHistogram(
-			`mo_fs_s3_conn_duration_seconds_bucket{type="connect"}`,
+		"FileService s3 connection duration",
+		c.getMultiHistogram(
+			[]string{
+				c.getMetricWithFilter(`mo_fs_s3_conn_duration_seconds_bucket`, `type="connect"`),
+				c.getMetricWithFilter(`mo_fs_s3_conn_duration_seconds_bucket`, `type="get-conn"`),
+				c.getMetricWithFilter(`mo_fs_s3_conn_duration_seconds_bucket`, `type="dns-resolve"`),
+				c.getMetricWithFilter(`mo_fs_s3_conn_duration_seconds_bucket`, `type="tls-handshake"`),
+			},
+			[]string{
+				"connect",
+				"get-conn",
+				"dns-resolve",
+				"tls-handshake",
+			},
 			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
-	)
-}
-
-func (c *DashboardCreator) initFSS3GetConnRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService get S3 connection",
-		c.getHistogram(
-			`mo_fs_s3_conn_duration_seconds_bucket{type="get-conn"}`,
-			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
-	)
-}
-
-func (c *DashboardCreator) initFSResolveS3DNSRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService resolve S3 dns",
-		c.getHistogram(
-			`mo_fs_s3_conn_duration_seconds_bucket{type="dns-resolve"}`,
-			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
-	)
-}
-
-func (c *DashboardCreator) initFSS3TLSHandshakeRow() dashboard.Option {
-	return dashboard.Row(
-		"FileService S3 connection tls handshake",
-		c.getHistogram(
-			`mo_fs_s3_conn_duration_seconds_bucket{type="tls-handshake"}`,
-			[]float64{0.50, 0.8, 0.90, 0.99},
-			[]float32{3, 3, 3, 3})...,
+			[]float32{3, 3, 3, 3},
+			axis.Unit("s"),
+			axis.Min(0))...,
 	)
 }

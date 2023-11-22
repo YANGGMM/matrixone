@@ -408,7 +408,14 @@ func (client *txnClient) openTxn(op *txnOperator) error {
 			client.addActiveTxnLocked(op)
 			return nil
 		}
-		op.waiter = newWaiter(timestamp.Timestamp{})
+		var cancelC chan struct{}
+		if client.timestampWaiter != nil {
+			cancelC = client.timestampWaiter.CancelC()
+			if cancelC == nil {
+				return moerr.NewWaiterPausedNoCtx()
+			}
+		}
+		op.waiter = newWaiter(timestamp.Timestamp{}, cancelC)
 		op.waiter.ref()
 		client.mu.waitActiveTxns = append(client.mu.waitActiveTxns, op)
 		return nil
@@ -487,13 +494,18 @@ func (client *txnClient) Resume() {
 func (client *txnClient) AbortAllRunningTxn() {
 	client.mu.Lock()
 	ops := make([]*txnOperator, 0, len(client.mu.activeTxns))
-	for key, op := range client.mu.activeTxns {
+	for _, op := range client.mu.activeTxns {
 		ops = append(ops, op)
-		delete(client.mu.activeTxns, key)
 	}
 	waitOps := append(([]*txnOperator)(nil), client.mu.waitActiveTxns...)
 	client.mu.waitActiveTxns = client.mu.waitActiveTxns[:0]
 	client.mu.Unlock()
+
+	if client.timestampWaiter != nil {
+		// Cancel all waiters, means that all waiters do not need to wait for
+		// the newer timestamp from logtail consumer.
+		client.timestampWaiter.Pause()
+	}
 
 	for _, op := range ops {
 		tempWorkspace := op.workspace
@@ -509,6 +521,11 @@ func (client *txnClient) AbortAllRunningTxn() {
 		_ = op.Rollback(context.Background())
 		op.workspace = tempWorkspace
 		op.notifyActive()
+	}
+
+	if client.timestampWaiter != nil {
+		// After rollback all transactions, resume the timestamp waiter channel.
+		client.timestampWaiter.Resume()
 	}
 }
 
