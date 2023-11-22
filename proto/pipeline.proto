@@ -26,9 +26,23 @@ import "plan.proto";
 import "timestamp.proto";
 import "lock.proto";
 
+enum Method {
+    UnknownMethod = 0;
+    PipelineMessage = 1;
+    BatchMessage = 2;
+    PrepareDoneNotifyMessage = 3;// for dispatch
+}
+
+enum Status {
+    UnknownStatus = 0;
+    WaitingNext = 1;
+    Last = 2;
+    MessageEnd = 3;
+}
+
 message Message {
-  uint64  sid = 1;
-  uint64  cmd = 2;
+  Status  sid = 1;
+  Method  cmd = 2;
   bytes   err = 3;
   bytes   data = 4;
   bytes   proc_info_data = 5;
@@ -166,6 +180,10 @@ message PreInsertUnique {
   plan.PreInsertUkCtx pre_insert_uk_ctx = 1;
 }
 
+message PreInsertSecondaryIndex{
+  plan.PreInsertUkCtx pre_insert_sk_ctx = 1;
+}
+
 message OnDuplicateKey{
   plan.TableDef table_def                   = 1;
   repeated int32 on_duplicate_idx           = 2;
@@ -184,6 +202,7 @@ message Join {
   repeated plan.Expr right_cond = 8;
   repeated plan.RuntimeFilterSpec runtime_filter_build_list = 9;
   bool hash_on_pk = 10;
+  bool is_shuffle =11;
 }
 
 message AntiJoin{
@@ -195,6 +214,7 @@ message AntiJoin{
   repeated plan.Expr left_cond = 6;
   repeated plan.Expr right_cond = 7;
   bool hash_on_pk = 8;
+  bool is_shuffle =9;
 }
 
 message LeftJoin {
@@ -208,6 +228,7 @@ message LeftJoin {
   repeated plan.Expr right_cond = 8;
   repeated plan.RuntimeFilterSpec runtime_filter_build_list = 9;
   bool hash_on_pk = 10;
+  bool is_shuffle =11;
 }
 
 message RightJoin {
@@ -222,6 +243,7 @@ message RightJoin {
   repeated plan.Expr right_cond = 9;
   repeated plan.RuntimeFilterSpec runtime_filter_build_list = 10;
   bool hash_on_pk = 11;
+  bool is_shuffle =12;
 }
 
 message RightSemiJoin {
@@ -234,6 +256,7 @@ message RightSemiJoin {
   repeated plan.Expr right_cond = 7;
   repeated plan.RuntimeFilterSpec runtime_filter_build_list = 8;
   bool hash_on_pk = 9;
+  bool is_shuffle =10;
 }
 
 message RightAntiJoin {
@@ -246,6 +269,7 @@ message RightAntiJoin {
   repeated plan.Expr right_cond = 7;
   repeated plan.RuntimeFilterSpec runtime_filter_build_list = 8;
   bool hash_on_pk = 9;
+  bool is_shuffle =10;
 }
 
 message SemiJoin {
@@ -258,6 +282,7 @@ message SemiJoin {
   repeated plan.Expr right_cond = 7;
   repeated plan.RuntimeFilterSpec runtime_filter_build_list = 8;
   bool hash_on_pk = 9;
+  bool is_shuffle =10;
 }
 
 message SingleJoin {
@@ -271,6 +296,7 @@ message SingleJoin {
   repeated plan.Expr right_cond = 8;
   repeated plan.RuntimeFilterSpec runtime_filter_build_list = 9;
   bool hash_on_pk = 10;
+  bool is_shuffle =11;
 }
 
 message MarkJoin {
@@ -283,12 +309,14 @@ message MarkJoin {
   repeated plan.Expr right_cond = 7;
   repeated plan.Expr on_list = 8;
   bool hash_on_pk = 9;
+  bool is_shuffle =10;
 }
 
 message Product {
   repeated int32 rel_list = 1;
   repeated int32 col_list = 2;
   repeated plan.Type  types = 3;
+  bool is_shuffle =4;
 }
 
 message TableFunction {
@@ -337,6 +365,18 @@ message StreamScan {
   int64 limit = 3;
 }
 
+message SampleFunc {
+  enum SampleType {
+    Rows = 0;
+    Percent = 1;
+    MergeRows = 2;
+  }
+  SampleType sample_type = 1;
+  int32 sample_rows = 2;
+  double sample_percent = 3;
+  repeated plan.Expr sample_columns = 4;
+}
+
 message Instruction{
   // Op specified the operator code of an instruction.
   int32 op = 1;
@@ -378,6 +418,8 @@ message Instruction{
   Shuffle shuffle = 33;
   Merge merge = 34;
   StreamScan stream_scan = 35;
+  PreInsertSecondaryIndex pre_insert_secondary_index  = 36;
+  SampleFunc sample_func = 37;
 }
 
 message AnalysisList {
@@ -414,12 +456,13 @@ message ProcessLimitation {
 
 message ProcessInfo {
   string id = 1;
-  ProcessLimitation lim = 2;
-  int64 unix_time = 3;
-  uint32 account_id = 4;
-  string snapshot = 5;
-  SessionInfo session_info = 6;
-  repeated int32 analysis_node_list = 7;
+  string sql = 2;
+  ProcessLimitation lim = 3;
+  int64 unix_time = 4;
+  uint32 account_id = 5;
+  string snapshot = 6;
+  SessionInfo session_info = 7;
+  repeated int32 analysis_node_list = 8;
 }
 
 message SessionInfo {

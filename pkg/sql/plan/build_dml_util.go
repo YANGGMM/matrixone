@@ -62,22 +62,23 @@ func putDeleteNodeInfo(info *deleteNodeInfo) {
 }
 
 type dmlPlanCtx struct {
-	objRef            *ObjectRef
-	tableDef          *TableDef
-	beginIdx          int
-	sourceStep        int32
-	isMulti           bool
-	needAggFilter     bool
-	updateColLength   int
-	rowIdPos          int
-	insertColPos      []int
-	updateColPosMap   map[string]int
-	allDelTableIDs    map[uint64]struct{}
-	isFkRecursionCall bool //if update plan was recursion called by parent table( ref foreign key), we do not check parent's foreign key contraint
-	lockTable         bool //we need lock table in stmt: delete from tbl
-	checkInsertPkDup  bool //if we need check for duplicate values in insert batch.  eg:insert into t values (1).  load data will not check
-	updatePkCol       bool //if update stmt will update the primary key or one of pks
-	pkFilterExprs     []*Expr
+	objRef                 *ObjectRef
+	tableDef               *TableDef
+	beginIdx               int
+	sourceStep             int32
+	isMulti                bool
+	needAggFilter          bool
+	updateColLength        int
+	rowIdPos               int
+	insertColPos           []int
+	updateColPosMap        map[string]int
+	allDelTableIDs         map[uint64]struct{}
+	isFkRecursionCall      bool //if update plan was recursion called by parent table( ref foreign key), we do not check parent's foreign key contraint
+	lockTable              bool //we need lock table in stmt: delete from tbl
+	checkInsertPkDup       bool //if we need check for duplicate values in insert batch.  eg:insert into t values (1).  load data will not check
+	updatePkCol            bool //if update stmt will update the primary key or one of pks
+	pkFilterExprs          []*Expr
+	isDeleteWithoutFilters bool
 }
 
 // information of deleteNode, which is about the deleted table
@@ -109,7 +110,7 @@ func buildInsertPlans(
 
 	// make insert plans
 	insertBindCtx := NewBindContext(builder, nil)
-	err := makeInsertPlan(ctx, builder, insertBindCtx, objRef, tableDef, 0, sourceStep, true, false, checkInsertPkDup, true, pkFilterExpr, isInsertWithoutAutoPkCol)
+	err := makeInsertPlan(ctx, builder, insertBindCtx, objRef, tableDef, 0, sourceStep, true, false, checkInsertPkDup, true, pkFilterExpr, isInsertWithoutAutoPkCol, true)
 	return err
 }
 
@@ -188,7 +189,7 @@ func buildUpdatePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 	// build insert plan.
 	insertBindCtx := NewBindContext(builder, nil)
 	err = makeInsertPlan(ctx, builder, insertBindCtx, updatePlanCtx.objRef, updatePlanCtx.tableDef, updatePlanCtx.updateColLength,
-		sourceStep, false, updatePlanCtx.isFkRecursionCall, updatePlanCtx.checkInsertPkDup, updatePlanCtx.updatePkCol, updatePlanCtx.pkFilterExprs, false)
+		sourceStep, false, updatePlanCtx.isFkRecursionCall, updatePlanCtx.checkInsertPkDup, updatePlanCtx.updatePkCol, updatePlanCtx.pkFilterExprs, false, true)
 
 	return err
 }
@@ -255,10 +256,13 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 	}
 	isUpdate := delCtx.updateColLength > 0
 
-	// delete unique table
+	// delete unique/secondary index table
+	// Refer to this PR:https://github.com/matrixorigin/matrixone/pull/12093
+	// we have build SK using UK code path. So we might see UK in function signature even thought it could be for
+	// both UK and SK. To handle SK case, we will have flags to indicate if it's UK or SK.
 	hasUniqueKey := haveUniqueKey(delCtx.tableDef)
-	if hasUniqueKey {
-		uniqueDeleteIdx := len(delCtx.tableDef.Cols) + delCtx.updateColLength
+	hasSecondaryKey := haveSecondaryKey(delCtx.tableDef)
+	if hasUniqueKey || hasSecondaryKey {
 		typMap := make(map[string]*plan.Type)
 		posMap := make(map[string]int)
 		for idx, col := range delCtx.tableDef.Cols {
@@ -266,21 +270,34 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 			typMap[col.Name] = col.Typ
 		}
 		for idx, indexdef := range delCtx.tableDef.Indexes {
-			if indexdef.Unique {
+			if indexdef.TableExist {
+				var isUk = indexdef.Unique
+				var isSK = !isUk
+
 				uniqueObjRef, uniqueTableDef := builder.compCtx.Resolve(delCtx.objRef.SchemaName, indexdef.IndexTableName)
 				if uniqueTableDef == nil {
 					return moerr.NewNoSuchTable(builder.GetContext(), delCtx.objRef.SchemaName, indexdef.IndexTableName)
 				}
+				var lastNodeId int32
+				var err error
+				var uniqueDeleteIdx int
+				var uniqueTblPkPos int
+				var uniqueTblPkTyp *Type
 
-				lastNodeId := appendSinkScanNode(builder, bindCtx, delCtx.sourceStep)
-
-				lastNodeId, err := appendDeleteUniqueTablePlan(builder, bindCtx, uniqueObjRef, uniqueTableDef, indexdef, typMap, posMap, lastNodeId)
+				if delCtx.isDeleteWithoutFilters {
+					lastNodeId, err = appendDeleteUniqueTablePlanWithoutFilters(builder, bindCtx, uniqueObjRef, uniqueTableDef)
+					uniqueDeleteIdx = getRowIdPos(uniqueTableDef)
+					uniqueTblPkPos, uniqueTblPkTyp = getPkPos(uniqueTableDef, false)
+				} else {
+					lastNodeId = appendSinkScanNode(builder, bindCtx, delCtx.sourceStep)
+					lastNodeId, err = appendDeleteUniqueTablePlan(builder, bindCtx, uniqueObjRef, uniqueTableDef, indexdef, typMap, posMap, lastNodeId, isUk)
+					uniqueDeleteIdx = len(delCtx.tableDef.Cols) + delCtx.updateColLength
+					uniqueTblPkPos = uniqueDeleteIdx + 1
+					uniqueTblPkTyp = uniqueTableDef.Cols[0].Typ
+				}
 				if err != nil {
 					return err
 				}
-
-				uniqueTblPkPos := uniqueDeleteIdx + 1
-				uniqueTblPkTyp := uniqueTableDef.Cols[0].Typ
 				if isUpdate {
 					// do it like simple update
 					lastNodeId = appendSinkNode(builder, bindCtx, lastNodeId)
@@ -290,7 +307,7 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 						//sink_scan -> lock -> delete
 						lastNodeId = appendSinkScanNode(builder, bindCtx, newSourceStep)
 						delNodeInfo := makeDeleteNodeInfo(builder.compCtx, uniqueObjRef, uniqueTableDef, uniqueDeleteIdx, -1, false, uniqueTblPkPos, uniqueTblPkTyp, delCtx.lockTable)
-						lastNodeId, err = makeOneDeletePlan(builder, bindCtx, lastNodeId, delNodeInfo, true)
+						lastNodeId, err = makeOneDeletePlan(builder, bindCtx, lastNodeId, delNodeInfo, isUk, isSK)
 						putDeleteNodeInfo(delNodeInfo)
 						if err != nil {
 							return err
@@ -320,18 +337,19 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 							ProjectList: projectProjection,
 						}
 						lastNodeId = builder.appendNode(projectNode, bindCtx)
-						preUKStep, err := appendPreInsertUkPlan(builder, bindCtx, delCtx.tableDef, lastNodeId, idx, true, uniqueTableDef)
+						preUKStep, err := appendPreInsertUkPlan(builder, bindCtx, delCtx.tableDef, lastNodeId, idx, true, uniqueTableDef, isUk)
 						if err != nil {
 							return err
 						}
 
-						insertUniqueTableDef := DeepCopyTableDef(uniqueTableDef)
-						for j, col := range insertUniqueTableDef.Cols {
-							if col.Name == catalog.Row_ID {
-								insertUniqueTableDef.Cols = append(insertUniqueTableDef.Cols[:j], insertUniqueTableDef.Cols[j+1:]...)
+						insertUniqueTableDef := DeepCopyTableDef(uniqueTableDef, false)
+						for _, col := range uniqueTableDef.Cols {
+							if col.Name != catalog.Row_ID {
+								insertUniqueTableDef.Cols = append(insertUniqueTableDef.Cols, DeepCopyColDef(col))
 							}
 						}
-						err = makeInsertPlan(ctx, builder, bindCtx, uniqueObjRef, insertUniqueTableDef, 1, preUKStep, false, false, true, true, nil, false)
+						_checkInsertPKDupForHiddenIndexTable := indexdef.Unique // only check PK uniqueness for UK. SK will not check PK uniqueness.
+						err = makeInsertPlan(ctx, builder, bindCtx, uniqueObjRef, insertUniqueTableDef, 1, preUKStep, false, false, _checkInsertPKDupForHiddenIndexTable, true, nil, false, _checkInsertPKDupForHiddenIndexTable)
 						if err != nil {
 							return err
 						}
@@ -339,7 +357,7 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 				} else {
 					// it's more simple for delete hidden unique table .so we append nodes after the plan. not recursive call buildDeletePlans
 					delNodeInfo := makeDeleteNodeInfo(builder.compCtx, uniqueObjRef, uniqueTableDef, uniqueDeleteIdx, -1, false, uniqueTblPkPos, uniqueTblPkTyp, delCtx.lockTable)
-					lastNodeId, err = makeOneDeletePlan(builder, bindCtx, lastNodeId, delNodeInfo, true)
+					lastNodeId, err = makeOneDeletePlan(builder, bindCtx, lastNodeId, delNodeInfo, isUk, isSK)
 					putDeleteNodeInfo(delNodeInfo)
 					if err != nil {
 						return err
@@ -359,7 +377,7 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 	}
 	pkPos, pkTyp := getPkPos(delCtx.tableDef, false)
 	delNodeInfo := makeDeleteNodeInfo(ctx, delCtx.objRef, delCtx.tableDef, delCtx.rowIdPos, partExprIdx, true, pkPos, pkTyp, delCtx.lockTable)
-	lastNodeId, err := makeOneDeletePlan(builder, bindCtx, lastNodeId, delNodeInfo, false)
+	lastNodeId, err := makeOneDeletePlan(builder, bindCtx, lastNodeId, delNodeInfo, false, false)
 	putDeleteNodeInfo(delNodeInfo)
 	if err != nil {
 		return err
@@ -422,16 +440,15 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 			for _, fk := range childTableDef.Fkeys {
 				if fk.ForeignTbl == delCtx.tableDef.TblId {
 					// update stmt: update the columns do not contain ref key, skip
+					updateRefColumn := make(map[string]int32)
 					if isUpdate {
-						updateRefColumn := false
 						for _, colId := range fk.ForeignCols {
 							updateName := idNameMap[colId]
-							if _, ok := delCtx.updateColPosMap[updateName]; ok {
-								updateRefColumn = true
-								break
+							if uIdx, ok := delCtx.updateColPosMap[updateName]; ok {
+								updateRefColumn[updateName] = int32(uIdx)
 							}
 						}
-						if !updateRefColumn {
+						if len(updateRefColumn) == 0 {
 							continue
 						}
 					}
@@ -496,7 +513,7 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 								if _, exists := childTablePkMap[childColumnName]; exists {
 									updatePk = true
 								}
-								condExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{leftExpr, rightExpr})
+								condExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{leftExpr, rightExpr})
 								if err != nil {
 									return err
 								}
@@ -529,6 +546,46 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 					}
 
 					lastNodeId = appendSinkScanNode(builder, bindCtx, delCtx.sourceStep)
+					// deal with case:  update t1 set a = a.  then do not need to check constraint
+					if isUpdate {
+						var filterExpr, tmpExpr *Expr
+						for updateName, newIdx := range updateRefColumn {
+							oldIdx := nameIdxMap[updateName]
+							tmpExpr, err = BindFuncExprImplByPlanExpr(builder.GetContext(), "!=", []*Expr{{
+								Typ: nameTypMap[updateName],
+								Expr: &plan.Expr_Col{
+									Col: &ColRef{
+										ColPos: oldIdx,
+										Name:   updateName,
+									},
+								},
+							}, {
+								Typ: nameTypMap[updateName],
+								Expr: &plan.Expr_Col{
+									Col: &ColRef{
+										ColPos: newIdx,
+										Name:   updateName,
+									},
+								},
+							}})
+							if err != nil {
+								return nil
+							}
+							if filterExpr == nil {
+								filterExpr = tmpExpr
+							} else {
+								filterExpr, err = BindFuncExprImplByPlanExpr(builder.GetContext(), "or", []*Expr{filterExpr, tmpExpr})
+								if err != nil {
+									return nil
+								}
+							}
+						}
+						lastNodeId = builder.appendNode(&plan.Node{
+							NodeType:   plan.Node_FILTER,
+							Children:   []int32{lastNodeId},
+							FilterList: []*Expr{filterExpr},
+						}, bindCtx)
+					}
 
 					switch refAction {
 					case plan.ForeignKeyDef_NO_ACTION, plan.ForeignKeyDef_RESTRICT, plan.ForeignKeyDef_SET_DEFAULT:
@@ -558,11 +615,11 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 							},
 						}
 						errExpr := makePlan2StringConstExprWithType("Cannot delete or update a parent row: a foreign key constraint fails")
-						isEmptyExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "isempty", []*Expr{colExpr})
+						isEmptyExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "isempty", []*Expr{colExpr})
 						if err != nil {
 							return err
 						}
-						assertExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{isEmptyExpr, errExpr})
+						assertExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{isEmptyExpr, errExpr})
 						if err != nil {
 							return err
 						}
@@ -582,7 +639,7 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 							NodeType:    plan.Node_TABLE_SCAN,
 							Stats:       &plan.Stats{},
 							ObjRef:      childObjRef,
-							TableDef:    DeepCopyTableDef(childTableDef),
+							TableDef:    DeepCopyTableDef(childTableDef, true),
 							ProjectList: childProjectList,
 						}, bindCtx)
 						lastNodeId = builder.appendNode(&plan.Node{
@@ -659,7 +716,7 @@ func buildDeletePlans(ctx CompilerContext, builder *QueryBuilder, bindCtx *BindC
 
 							upPlanCtx := getDmlPlanCtx()
 							upPlanCtx.objRef = childObjRef
-							upPlanCtx.tableDef = DeepCopyTableDef(childTableDef)
+							upPlanCtx.tableDef = DeepCopyTableDef(childTableDef, true)
 							upPlanCtx.updateColLength = len(rightConds)
 							upPlanCtx.isMulti = false
 							upPlanCtx.rowIdPos = childRowIdPos
@@ -777,6 +834,7 @@ func makeInsertPlan(
 	updatePkCol bool,
 	pkFilterExprs []*Expr,
 	isInsertWithoutAutoPkCol bool,
+	checkInsertPkDupForHiddenIndexTable bool,
 ) error {
 	var lastNodeId int32
 	var err error
@@ -836,7 +894,7 @@ func makeInsertPlan(
 	// append plan for the hidden tables of unique keys
 	if updateColLength == 0 {
 		for idx, indexdef := range tableDef.Indexes {
-			if indexdef.Unique {
+			if indexdef.TableExist {
 				idxRef, idxTableDef := ctx.Resolve(objRef.SchemaName, indexdef.IndexTableName)
 				// remove row_id
 				for i, col := range idxTableDef.Cols {
@@ -847,12 +905,13 @@ func makeInsertPlan(
 				}
 
 				lastNodeId = appendSinkScanNode(builder, bindCtx, sourceStep)
-				newSourceStep, err := appendPreInsertUkPlan(builder, bindCtx, tableDef, lastNodeId, idx, false, idxTableDef)
+				newSourceStep, err := appendPreInsertUkPlan(builder, bindCtx, tableDef, lastNodeId, idx, false, idxTableDef, indexdef.Unique)
 				if err != nil {
 					return err
 				}
 
-				err = makeInsertPlan(ctx, builder, bindCtx, idxRef, idxTableDef, 0, newSourceStep, false, false, checkInsertPkDup, true, nil, false)
+				_checkInsertPkDupForHiddenTable := indexdef.Unique // only check PK uniqueness for UK. SK will not check PK uniqueness.
+				err = makeInsertPlan(ctx, builder, bindCtx, idxRef, idxTableDef, 0, newSourceStep, false, false, checkInsertPkDupForHiddenIndexTable, true, nil, false, _checkInsertPkDupForHiddenTable)
 				if err != nil {
 					return err
 				}
@@ -882,15 +941,15 @@ func makeInsertPlan(
 				Expr: &plan.Expr_Col{
 					Col: &plan.ColRef{
 						ColPos: int32(beginIdx + i),
-						Name:   catalog.Row_ID,
+						//Name:   catalog.Row_ID,
 					},
 				},
 			}
-			nullCheckExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "isnotnull", []*Expr{colExpr})
+			nullCheckExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "isnotnull", []*Expr{colExpr})
 			if err != nil {
 				return err
 			}
-			filterExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{nullCheckExpr, errExpr})
+			filterExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{nullCheckExpr, errExpr})
 			if err != nil {
 				return err
 			}
@@ -912,7 +971,7 @@ func makeInsertPlan(
 	isUpdate := updateColLength > 0
 
 	// make plan: sink_scan -> group_by -> filter  //check if pk is unique in rows
-	if checkInsertPkDup {
+	if checkInsertPkDup && checkInsertPkDupForHiddenIndexTable {
 		// insert stmt or update pk col, we need check insert pk dup
 		if !isUpdate || (isUpdate && updatePkCol) {
 			if pkPos, pkTyp := getPkPos(tableDef, true); pkPos != -1 {
@@ -941,7 +1000,7 @@ func makeInsertPlan(
 					},
 				}
 
-				eqCheckExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{MakePlan2Int64ConstExprWithType(1), countColExpr})
+				eqCheckExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{MakePlan2Int64ConstExprWithType(1), countColExpr})
 				if err != nil {
 					return err
 				}
@@ -955,7 +1014,7 @@ func makeInsertPlan(
 				if err != nil {
 					return err
 				}
-				filterExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{eqCheckExpr, varcharExpr, makePlan2StringConstExprWithType(tableDef.Cols[pkPos].Name)})
+				filterExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{eqCheckExpr, varcharExpr, makePlan2StringConstExprWithType(tableDef.Cols[pkPos].Name)})
 				if err != nil {
 					return err
 				}
@@ -972,43 +1031,25 @@ func makeInsertPlan(
 	}
 
 	// make plan: sink_scan -> join -> filter	// check if pk is unique in rows & snapshot
-	if CNPrimaryCheck {
+	if CNPrimaryCheck && checkInsertPkDupForHiddenIndexTable {
 		if pkPos, pkTyp := getPkPos(tableDef, true); pkPos != -1 {
 			rfTag := builder.genNewTag()
 
 			if isUpdate && updatePkCol { // update stmt && pk included in update cols
 				lastNodeId = appendSinkScanNode(builder, bindCtx, sourceStep)
+				scanTableDef := DeepCopyTableDef(tableDef, false)
+
+				rowIdIdx := len(tableDef.Cols)
 				rowIdDef := MakeRowIdColDef()
 				tableDef.Cols = append(tableDef.Cols, rowIdDef)
-				scanTableDef := DeepCopyTableDef(tableDef)
 
-				colPos := make(map[int32]int32)
-				colPos[int32(pkPos)] = 0
-				// if len(pkFilterExprs) > 0 {
-				// 	for _, e := range pkFilterExprs {
-				// 		getColPos(e, colPos)
-				// 	}
-				// }
-				var newCols []*ColDef
-				rowIdIdx := len(scanTableDef.Cols) - 1
-				for idx, col := range scanTableDef.Cols {
-					if _, ok := colPos[int32(idx)]; ok {
-						colPos[int32(idx)] = int32(len(newCols))
-						newCols = append(newCols, col)
-					}
-					if col.Name == catalog.Row_ID {
-						colPos[int32(idx)] = int32(len(newCols))
-						newCols = append(newCols, col)
-					}
-				}
-				scanTableDef.Cols = newCols
+				scanTableDef.Cols = []*plan.ColDef{DeepCopyColDef(tableDef.Cols[pkPos]), DeepCopyColDef(rowIdDef)}
 
 				scanPkExpr := &Expr{
 					Typ: pkTyp,
 					Expr: &plan.Expr_Col{
 						Col: &ColRef{
-							ColPos: colPos[int32(pkPos)],
-							Name:   tableDef.Pkey.PkeyColName,
+							Name: tableDef.Pkey.PkeyColName,
 						},
 					},
 				}
@@ -1016,7 +1057,7 @@ func makeInsertPlan(
 					Typ: rowIdDef.Typ,
 					Expr: &plan.Expr_Col{
 						Col: &ColRef{
-							ColPos: colPos[int32(rowIdIdx)],
+							ColPos: 1,
 							Name:   rowIdDef.Name,
 						},
 					},
@@ -1034,9 +1075,7 @@ func makeInsertPlan(
 								Typ: DeepCopyType(pkTyp),
 								Expr: &plan.Expr_Col{
 									Col: &plan.ColRef{
-										RelPos: 0,
-										ColPos: 0,
-										Name:   tableDef.Pkey.PkeyColName,
+										Name: tableDef.Pkey.PkeyColName,
 									},
 								},
 							},
@@ -1044,17 +1083,6 @@ func makeInsertPlan(
 					},
 				}
 				rightId := builder.appendNode(scanNode, bindCtx)
-				// if len(pkFilterExprs) > 0 {
-				// 	for _, e := range pkFilterExprs {
-				// 		resetColPos(e, colPos)
-				// 	}
-				// 	blockFilters := make([]*Expr, len(pkFilterExprs))
-				// 	for i, e := range pkFilterExprs {
-				// 		blockFilters[i] = DeepCopyExpr(e)
-				// 	}
-				// 	scanNode.FilterList = pkFilterExprs
-				// 	scanNode.BlockFilterList = blockFilters
-				// }
 
 				pkColExpr := &Expr{
 					Typ: pkTyp,
@@ -1074,7 +1102,7 @@ func makeInsertPlan(
 						},
 					},
 				}
-				condExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{pkColExpr, rightExpr})
+				condExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{pkColExpr, rightExpr})
 				if err != nil {
 					return err
 				}
@@ -1092,7 +1120,7 @@ func makeInsertPlan(
 					Expr: &plan.Expr_Col{
 						Col: &ColRef{
 							RelPos: 1,
-							ColPos: int32(len(tableDef.Cols) - 1),
+							ColPos: int32(rowIdIdx),
 							Name:   rowIdDef.Name,
 						},
 					},
@@ -1153,7 +1181,7 @@ func makeInsertPlan(
 						Typ: rowIdExpr.Typ,
 						Expr: &plan.Expr_Col{
 							Col: &ColRef{
-								RelPos: 1,
+								RelPos: -1,
 								ColPos: 0,
 								Name:   catalog.Row_ID,
 							},
@@ -1162,7 +1190,7 @@ func makeInsertPlan(
 						Typ: rowIdExpr.Typ,
 						Expr: &plan.Expr_Col{
 							Col: &ColRef{
-								RelPos: 1,
+								RelPos: -1,
 								ColPos: 1,
 								Name:   catalog.Row_ID,
 							},
@@ -1171,7 +1199,7 @@ func makeInsertPlan(
 						Typ: pkColExpr.Typ,
 						Expr: &plan.Expr_Col{
 							Col: &ColRef{
-								RelPos: 1,
+								RelPos: -1,
 								ColPos: 2,
 								Name:   tableDef.Pkey.PkeyColName,
 							},
@@ -1186,7 +1214,7 @@ func makeInsertPlan(
 				lastNodeId = builder.appendNode(aggNode, bindCtx)
 
 				// append filter node
-				filterExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "not_in_rows", []*Expr{
+				filterExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "not_in_rows", []*Expr{
 					{
 						Typ: rowIdExpr.Typ,
 						Expr: &plan.Expr_Col{
@@ -1228,7 +1256,7 @@ func makeInsertPlan(
 				}, bindCtx)
 
 				// append assert node
-				isEmptyExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "isempty", []*Expr{colExpr})
+				isEmptyExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "isempty", []*Expr{colExpr})
 				if err != nil {
 					return err
 				}
@@ -1243,7 +1271,7 @@ func makeInsertPlan(
 				if err != nil {
 					return err
 				}
-				assertExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{isEmptyExpr, varcharExpr, makePlan2StringConstExprWithType(tableDef.Cols[pkPos].Name)})
+				assertExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{isEmptyExpr, varcharExpr, makePlan2StringConstExprWithType(tableDef.Cols[pkPos].Name)})
 				if err != nil {
 					return err
 				}
@@ -1259,27 +1287,24 @@ func makeInsertPlan(
 			// insert stmt but not load stmt, not insert without auto incr pk col
 			if !isUpdate && !builder.qry.LoadTag && !isInsertWithoutAutoPkCol {
 				if len(pkFilterExprs) > 0 {
-					scanTableDef := DeepCopyTableDef(tableDef)
-					// scanTableDef.Cols = []*ColDef{scanTableDef.Cols[pkPos]}
 					pkNameMap := make(map[string]int)
 					for i, n := range tableDef.Pkey.Names {
 						pkNameMap[n] = i
 					}
-					newCols := make([]*ColDef, len(scanTableDef.Pkey.Names))
-					for _, def := range scanTableDef.Cols {
-						if i, ok := pkNameMap[def.Name]; ok {
-							newCols[i] = def
+					pkSize := len(tableDef.Pkey.Names)
+					if pkSize > 1 {
+						pkSize++
+					}
+					scanTableDef := DeepCopyTableDef(tableDef, false)
+					scanTableDef.Cols = make([]*ColDef, pkSize)
+					for _, col := range tableDef.Cols {
+						if i, ok := pkNameMap[col.Name]; ok {
+							scanTableDef.Cols[i] = DeepCopyColDef(col)
+						} else if col.Name == scanTableDef.Pkey.PkeyColName {
+							scanTableDef.Cols[pkSize-1] = DeepCopyColDef(col)
+							break
 						}
 					}
-					if len(newCols) > 1 {
-						for _, col := range scanTableDef.Cols {
-							if col.Name == scanTableDef.Pkey.PkeyColName {
-								newCols = append(newCols, col)
-								break
-							}
-						}
-					}
-					scanTableDef.Cols = newCols
 					scanNode := &plan.Node{
 						NodeType: plan.Node_TABLE_SCAN,
 						Stats:    &plan.Stats{},
@@ -1305,8 +1330,8 @@ func makeInsertPlan(
 					scanNode.BlockFilterList = blockFilterList
 				} else {
 					lastNodeId = appendSinkScanNode(builder, bindCtx, sourceStep)
-					scanTableDef := DeepCopyTableDef(tableDef)
-					scanTableDef.Cols = []*ColDef{scanTableDef.Cols[pkPos]}
+					scanTableDef := DeepCopyTableDef(tableDef, false)
+					scanTableDef.Cols = []*ColDef{DeepCopyColDef(tableDef.Cols[pkPos])}
 					scanNode := &plan.Node{
 						NodeType: plan.Node_TABLE_SCAN,
 						Stats:    &plan.Stats{},
@@ -1357,7 +1382,7 @@ func makeInsertPlan(
 							},
 						},
 					}
-					condExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{rightExpr, leftExpr})
+					condExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{rightExpr, leftExpr})
 					if err != nil {
 						return err
 					}
@@ -1397,7 +1422,7 @@ func makeInsertPlan(
 					},
 				}
 
-				isEmptyExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "isempty", []*Expr{colExpr})
+				isEmptyExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "isempty", []*Expr{colExpr})
 				if err != nil {
 					return err
 				}
@@ -1413,7 +1438,7 @@ func makeInsertPlan(
 					return err
 				}
 
-				assertExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{isEmptyExpr, varcharExpr, makePlan2StringConstExprWithType(tableDef.Cols[pkPos].Name)})
+				assertExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "assert", []*Expr{isEmptyExpr, varcharExpr, makePlan2StringConstExprWithType(tableDef.Cols[pkPos].Name)})
 				if err != nil {
 					return err
 				}
@@ -1440,8 +1465,9 @@ func makeOneDeletePlan(
 	lastNodeId int32,
 	delNodeInfo *deleteNodeInfo,
 	isUK bool, // is delete unique key hidden table
+	isSK bool,
 ) (int32, error) {
-	if isUK {
+	if isUK || isSK {
 		// append lock
 		lockTarget := &plan.LockTarget{
 			TableId:            delNodeInfo.tableDef.TblId,
@@ -1540,6 +1566,15 @@ func getProjectionByLastNodeWithTag(builder *QueryBuilder, lastNodeId, tag int32
 func haveUniqueKey(tableDef *TableDef) bool {
 	for _, indexdef := range tableDef.Indexes {
 		if indexdef.Unique {
+			return true
+		}
+	}
+	return false
+}
+
+func haveSecondaryKey(tableDef *TableDef) bool {
+	for _, indexdef := range tableDef.Indexes {
+		if !indexdef.Unique && indexdef.TableExist {
 			return true
 		}
 	}
@@ -1689,7 +1724,7 @@ func appendSinkNodeWithTag(builder *QueryBuilder, bindCtx *BindContext, lastNode
 }
 
 func appendAggCountGroupByColExpr(builder *QueryBuilder, bindCtx *BindContext, lastNodeId int32, colExpr *plan.Expr) (int32, error) {
-	aggExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "starcount", []*Expr{colExpr})
+	aggExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "starcount", []*Expr{colExpr})
 	if err != nil {
 		return -1, err
 	}
@@ -1813,7 +1848,7 @@ func appendJoinNodeForParentFkCheck(builder *QueryBuilder, bindCtx *BindContext,
 							},
 						},
 					}
-					condExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "isnotnull", []*Expr{colExpr})
+					condExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "isnotnull", []*Expr{colExpr})
 					if err != nil {
 						return -1, err
 					}
@@ -1831,16 +1866,51 @@ func appendJoinNodeForParentFkCheck(builder *QueryBuilder, bindCtx *BindContext,
 
 	lastNodeId := baseNodeId
 	for _, fk := range tableDef.Fkeys {
-		parentObjRef, parentTableDef := builder.compCtx.ResolveById(fk.ForeignTbl)
-		parentPosMap := make(map[string]int32)
-		parentTypMap := make(map[string]*plan.Type)
-		parentId2name := make(map[uint64]string)
-		for idx, col := range parentTableDef.Cols {
-			parentPosMap[col.Name] = int32(idx)
-			parentTypMap[col.Name] = col.Typ
-			parentId2name[col.ColId] = col.Name
+		fkeyId2Idx := make(map[uint64]int)
+		for i, colId := range fk.ForeignCols {
+			fkeyId2Idx[colId] = i
 		}
-		projectList := getProjectionByLastNode(builder, lastNodeId)
+
+		parentObjRef, parentTableDef := builder.compCtx.ResolveById(fk.ForeignTbl)
+		newTableDef := DeepCopyTableDef(parentTableDef, false)
+		joinConds := make([]*plan.Expr, 0)
+		for _, col := range parentTableDef.Cols {
+			if fkIdx, ok := fkeyId2Idx[col.ColId]; ok {
+				rightPos := len(newTableDef.Cols)
+				newTableDef.Cols = append(newTableDef.Cols, DeepCopyColDef(col))
+
+				parentColumnName := col.Name
+				childColumnName := id2name[fk.Cols[fkIdx]]
+
+				leftExpr := &Expr{
+					Typ: typMap[childColumnName],
+					Expr: &plan.Expr_Col{
+						Col: &plan.ColRef{
+							RelPos: 0,
+							ColPos: int32(name2pos[childColumnName]),
+							Name:   childColumnName,
+						},
+					},
+				}
+				rightExpr := &plan.Expr{
+					Typ: DeepCopyType(col.Typ),
+					Expr: &plan.Expr_Col{
+						Col: &plan.ColRef{
+							RelPos: 1,
+							ColPos: int32(rightPos),
+							Name:   parentColumnName,
+						},
+					},
+				}
+				condExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{leftExpr, rightExpr})
+				if err != nil {
+					return -1, err
+				}
+				joinConds = append(joinConds, condExpr)
+			}
+		}
+
+		parentTableDef = newTableDef
 
 		// append table scan node
 		scanNodeProject := make([]*Expr, len(parentTableDef.Cols))
@@ -1863,52 +1933,16 @@ func appendJoinNodeForParentFkCheck(builder *QueryBuilder, bindCtx *BindContext,
 			ProjectList: scanNodeProject,
 		}, bindCtx)
 
-		// build join conds
-		joinConds := make([]*Expr, len(fk.Cols))
-		for i, colId := range fk.ForeignCols {
-			for _, col := range parentTableDef.Cols {
-				if col.ColId == colId {
-					parentColumnName := col.Name
-					childColumnName := id2name[fk.Cols[i]]
-
-					leftExpr := &Expr{
-						Typ: typMap[childColumnName],
-						Expr: &plan.Expr_Col{
-							Col: &plan.ColRef{
-								RelPos: 0,
-								ColPos: int32(name2pos[childColumnName]),
-								Name:   childColumnName,
-							},
-						},
-					}
-					rightExpr := &plan.Expr{
-						Typ: parentTypMap[parentColumnName],
-						Expr: &plan.Expr_Col{
-							Col: &plan.ColRef{
-								RelPos: 1,
-								ColPos: parentPosMap[parentColumnName],
-								Name:   parentColumnName,
-							},
-						},
-					}
-					condExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{leftExpr, rightExpr})
-					if err != nil {
-						return -1, err
-					}
-					joinConds[i] = condExpr
-					break
-				}
-			}
-		}
+		projectList := getProjectionByLastNode(builder, lastNodeId)
 
 		// append project
 		projectList = append(projectList, &Expr{
-			Typ: parentTypMap[catalog.Row_ID],
+			Typ: DeepCopyType(parentTableDef.Cols[0].Typ),
 			Expr: &plan.Expr_Col{
 				Col: &plan.ColRef{
 					RelPos: 1,
-					ColPos: parentPosMap[catalog.Row_ID],
-					Name:   catalog.Row_ID,
+					ColPos: 0,
+					Name:   parentTableDef.Cols[0].Name,
 				},
 			},
 		})
@@ -1978,7 +2012,7 @@ func appendPreInsertNode(builder *QueryBuilder, bindCtx *BindContext,
 		ProjectList: preInsertProjection,
 		PreInsertCtx: &plan.PreInsertCtx{
 			Ref:        objRef,
-			TableDef:   DeepCopyTableDef(tableDef),
+			TableDef:   DeepCopyTableDef(tableDef, true),
 			HasAutoCol: hashAutoCol,
 			IsUpdate:   isUpdate,
 		},
@@ -2040,7 +2074,8 @@ func appendPreInsertUkPlan(
 	lastNodeId int32,
 	indexIdx int,
 	isUpddate bool,
-	uniqueTableDef *TableDef) (int32, error) {
+	uniqueTableDef *TableDef,
+	isUK bool) (int32, error) {
 	var useColumns []int32
 	idxDef := tableDef.Indexes[indexIdx]
 	colsMap := make(map[string]int)
@@ -2049,6 +2084,7 @@ func appendPreInsertUkPlan(
 		colsMap[col.Name] = i
 	}
 	for _, part := range idxDef.Parts {
+		part = catalog.ResolveAlias(part)
 		if i, ok := colsMap[part]; ok {
 			useColumns = append(useColumns, int32(i))
 		}
@@ -2099,18 +2135,39 @@ func appendPreInsertUkPlan(
 			},
 		})
 	}
-
-	preInsertUkNode := &Node{
-		NodeType:    plan.Node_PRE_INSERT_UK,
-		Children:    []int32{lastNodeId},
-		ProjectList: preinsertUkProjection,
-		PreInsertUkCtx: &plan.PreInsertUkCtx{
-			Columns:  useColumns,
-			PkColumn: int32(pkColumn),
-			PkType:   originPkType,
-			UkType:   ukType,
-			TableDef: tableDef,
-		},
+	//TODO: once everything works, rename all the UK to a more generic name that means UK and SK.
+	// ie preInsertUkNode -> preInsertIKNode
+	// NOTE: we have build secondary index by reusing the whole code flow of Unique Index.
+	// This would be done in a separate PR after verifying the correctness of the current code.
+	var preInsertUkNode *Node
+	if isUK {
+		preInsertUkNode = &Node{
+			NodeType:    plan.Node_PRE_INSERT_UK,
+			Children:    []int32{lastNodeId},
+			ProjectList: preinsertUkProjection,
+			PreInsertUkCtx: &plan.PreInsertUkCtx{
+				Columns:  useColumns,
+				PkColumn: int32(pkColumn),
+				PkType:   originPkType,
+				UkType:   ukType,
+				TableDef: tableDef,
+			},
+		}
+	} else {
+		// NOTE: We don't defined PreInsertSkCtx. Instead, we use PreInsertUkCtx for both UK and SK since there
+		// is no difference in the contents.
+		preInsertUkNode = &Node{
+			NodeType:    plan.Node_PRE_INSERT_SK,
+			Children:    []int32{lastNodeId},
+			ProjectList: preinsertUkProjection,
+			PreInsertSkCtx: &plan.PreInsertUkCtx{
+				Columns:  useColumns,
+				PkColumn: int32(pkColumn),
+				PkType:   originPkType,
+				UkType:   ukType,
+				TableDef: tableDef,
+			},
+		}
 	}
 	lastNodeId = builder.appendNode(preInsertUkNode, bindCtx)
 
@@ -2143,6 +2200,7 @@ func appendDeleteUniqueTablePlan(
 	typMap map[string]*plan.Type,
 	posMap map[string]int,
 	baseNodeId int32,
+	isUK bool,
 ) (int32, error) {
 	lastNodeId := baseNodeId
 	var err error
@@ -2227,6 +2285,7 @@ func appendDeleteUniqueTablePlan(
 	} else {
 		args := make([]*Expr, partsLength)
 		for i, column := range indexdef.Parts {
+			column = catalog.ResolveAlias(column)
 			typ := typMap[column]
 			args[i] = &plan.Expr{
 				Typ: typ,
@@ -2239,13 +2298,17 @@ func appendDeleteUniqueTablePlan(
 				},
 			}
 		}
-		leftExpr, err = bindFuncExprImplByPlanExpr(builder.GetContext(), "serial", args)
+		if isUK {
+			leftExpr, err = BindFuncExprImplByPlanExpr(builder.GetContext(), "serial", args)
+		} else {
+			leftExpr, err = BindFuncExprImplByPlanExpr(builder.GetContext(), "serial_full", args)
+		}
 		if err != nil {
 			return -1, err
 		}
 	}
 
-	condExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{leftExpr, rightExpr})
+	condExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*Expr{leftExpr, rightExpr})
 	if err != nil {
 		return -1, err
 	}
@@ -2258,7 +2321,34 @@ func appendDeleteUniqueTablePlan(
 		OnList:      joinConds,
 		ProjectList: projectList,
 	}, bindCtx)
+	return lastNodeId, nil
+}
 
+func appendDeleteUniqueTablePlanWithoutFilters(
+	builder *QueryBuilder,
+	bindCtx *BindContext,
+	uniqueObjRef *ObjectRef,
+	uniqueTableDef *TableDef,
+) (int32, error) {
+	scanNodeProject := make([]*Expr, len(uniqueTableDef.Cols))
+	for colIdx, col := range uniqueTableDef.Cols {
+		scanNodeProject[colIdx] = &plan.Expr{
+			Typ: col.Typ,
+			Expr: &plan.Expr_Col{
+				Col: &plan.ColRef{
+					ColPos: int32(colIdx),
+					Name:   col.Name,
+				},
+			},
+		}
+	}
+	lastNodeId := builder.appendNode(&plan.Node{
+		NodeType:    plan.Node_TABLE_SCAN,
+		Stats:       &plan.Stats{},
+		ObjRef:      uniqueObjRef,
+		TableDef:    uniqueTableDef,
+		ProjectList: scanNodeProject,
+	}, bindCtx)
 	return lastNodeId, nil
 }
 
@@ -2367,7 +2457,7 @@ func makePreUpdateDeletePlan(
 					},
 				},
 			}
-			aggExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "any_value", []*Expr{baseExpr})
+			aggExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "any_value", []*Expr{baseExpr})
 			if err != nil {
 				return -1, err
 			}
@@ -2406,7 +2496,7 @@ func makePreUpdateDeletePlan(
 				},
 			},
 		}
-		nullCheckExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "isnotnull", []*Expr{rowIdExpr})
+		nullCheckExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "isnotnull", []*Expr{rowIdExpr})
 		if err != nil {
 			return -1, err
 		}
@@ -2481,7 +2571,7 @@ func makePreUpdateDeletePlan(
 					Expr: &plan.Expr_Col{Col: &plan.ColRef{ColPos: int32(colIdx)}},
 				}
 			}
-			cpPkExpr, err := bindFuncExprImplByPlanExpr(builder.GetContext(), "serial", pkColExpr)
+			cpPkExpr, err := BindFuncExprImplByPlanExpr(builder.GetContext(), "serial", pkColExpr)
 			if err != nil {
 				return -1, err
 			}

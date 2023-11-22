@@ -17,6 +17,8 @@ package tnservice
 import (
 	"context"
 	"errors"
+	"github.com/matrixorigin/matrixone/pkg/pb/query"
+	"github.com/matrixorigin/matrixone/pkg/queryservice"
 	"github.com/matrixorigin/matrixone/pkg/util"
 	"sync"
 	"time"
@@ -26,7 +28,6 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/common/morpc"
 	"github.com/matrixorigin/matrixone/pkg/common/runtime"
 	"github.com/matrixorigin/matrixone/pkg/common/stopper"
-	"github.com/matrixorigin/matrixone/pkg/ctlservice"
 	"github.com/matrixorigin/matrixone/pkg/defines"
 	"github.com/matrixorigin/matrixone/pkg/fileservice"
 	"github.com/matrixorigin/matrixone/pkg/lockservice"
@@ -95,7 +96,6 @@ func WithConfigData(data map[string]*logservicepb.ConfigItem) Option {
 }
 
 type store struct {
-	perfCounter         *perfcounter.CounterSet
 	cfg                 *Config
 	rt                  runtime.Runtime
 	sender              rpc.TxnSender
@@ -105,7 +105,6 @@ type store struct {
 	metadataFileService fileservice.ReplaceableFileService
 	lockTableAllocator  lockservice.LockTableAllocator
 	moCluster           clusterservice.MOCluster
-	ctlservice          ctlservice.CtlService
 	replicas            *sync.Map
 	stopper             *stopper.Stopper
 	shutdownC           chan struct{}
@@ -132,11 +131,12 @@ type store struct {
 	addressMgr address.AddressManager
 
 	config *util.ConfigData
+	// queryService for getting cache info from tnservice
+	queryService queryservice.QueryService
 }
 
 // NewService create TN Service
 func NewService(
-	perfCounter *perfcounter.CounterSet,
 	cfg *Config,
 	rt runtime.Runtime,
 	fileService fileservice.FileService,
@@ -162,7 +162,6 @@ func NewService(
 	blockio.Start()
 
 	s := &store{
-		perfCounter:         perfCounter,
 		cfg:                 cfg,
 		rt:                  rt,
 		fileService:         fileService,
@@ -200,9 +199,9 @@ func NewService(
 	if err := s.initMetadata(); err != nil {
 		return nil, err
 	}
-	if err := s.initCtlService(); err != nil {
-		return nil, err
-	}
+
+	s.initQueryService(cfg.InStandalone)
+
 	s.initTaskHolder()
 	s.initSqlWriterFactory()
 	return s, nil
@@ -215,8 +214,10 @@ func (s *store) Start() error {
 	if err := s.server.Start(); err != nil {
 		return err
 	}
-	if err := s.ctlservice.Start(); err != nil {
-		return err
+	if s.queryService != nil {
+		if err := s.queryService.Start(); err != nil {
+			return err
+		}
 	}
 	s.rt.SubLogger(runtime.SystemInit).Info("dn heartbeat task started")
 	return s.stopper.RunTask(s.heartbeatTask)
@@ -226,7 +227,6 @@ func (s *store) Close() error {
 	s.stopper.Stop()
 	s.moCluster.Close()
 	err := errors.Join(
-		s.ctlservice.Close(),
 		s.hakeeperClient.Close(),
 		s.sender.Close(),
 		s.server.Close(),
@@ -299,7 +299,6 @@ func (s *store) createReplica(shard metadata.TNShard) error {
 			case <-ctx.Done():
 				return
 			default:
-				ctx = perfcounter.WithCounterSet(ctx, s.perfCounter)
 				storage, err := s.createTxnStorage(ctx, shard)
 				if err != nil {
 					r.logger.Error("start DNShard failed",
@@ -416,4 +415,42 @@ func (s *store) initClusterService() {
 	s.moCluster = clusterservice.NewMOCluster(s.hakeeperClient,
 		s.cfg.Cluster.RefreshInterval.Duration)
 	runtime.ProcessLevelRuntime().SetGlobalVariables(runtime.ClusterService, s.moCluster)
+}
+
+// initQueryService
+// inStandalone:
+//
+//	true: tn is boosted in a standalone cluster. cn has a queryservice already.
+//	false: tn is boosted in an independent process. tn needs a queryservice.
+func (s *store) initQueryService(inStandalone bool) {
+	if inStandalone {
+		s.queryService = nil
+		return
+	}
+	var err error
+	s.queryService, err = queryservice.NewQueryService(s.cfg.UUID,
+		s.queryServiceListenAddr(), s.cfg.RPC)
+	if err != nil {
+		panic(err)
+	}
+	s.initQueryCommandHandler()
+}
+
+func (s *store) initQueryCommandHandler() {
+	if s.queryService != nil {
+		s.queryService.AddHandleFunc(query.CmdMethod_GetCacheInfo, s.handleGetCacheInfo, false)
+	}
+}
+
+func (s *store) handleGetCacheInfo(ctx context.Context, req *query.Request, resp *query.Response) error {
+	resp.GetCacheInfoResponse = new(query.GetCacheInfoResponse)
+	perfcounter.GetCacheStats(func(infos []*query.CacheInfo) {
+		for _, info := range infos {
+			if info != nil {
+				resp.GetCacheInfoResponse.CacheInfoList = append(resp.GetCacheInfoResponse.CacheInfoList, info)
+			}
+		}
+	})
+
+	return nil
 }
