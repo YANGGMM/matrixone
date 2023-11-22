@@ -21,6 +21,7 @@ option go_package = "github.com/matrixorigin/matrixone/pkg/pb/query";
 import "status.proto";
 import "lock.proto";
 import "txn.proto";
+import "timestamp.proto";
 import "github.com/gogo/protobuf/gogoproto/gogo.proto";
 import "google/protobuf/timestamp.proto";
 
@@ -40,6 +41,14 @@ enum CmdMethod {
   GetLockInfo = 5;
   // GetTxnInfo gets the txn info from the cn
   GetTxnInfo = 6;
+  // GetCacheInfo gets the cache info from the cn,tn
+  GetCacheInfo = 7;
+  // SyncCommit when we turn on Push, some BVT tests use multiple Sessions in multi-CN scenarios. To
+  // ensure data visibility, we need to synchronize CommitTS between multiple CNs so that the whole
+  // cluster can see the latest writes from other CNs.
+  SyncCommit = 8;
+  // GetCommit get latest commit timestamp of cn.
+  GetCommit = 9;
 }
 
 // QueryRequest is the common query request. It contains the query
@@ -55,6 +64,28 @@ message ShowProcessListRequest {
   string Tenant = 1;
   // SysTenet is true if the tenant is a system tenant.
   bool SysTenant = 2;
+}
+
+// SyncCommitRequest sync commit timestamp request
+message SyncCommitRequest {
+  // LatestCommitTS update latest commit ts.
+  timestamp.Timestamp LatestCommitTS = 1 [(gogoproto.nullable) = false];
+}
+
+// SyncCommitResponse sync commit timestamp response
+message SyncCommitResponse {
+  // CurrentCommitTS current commit timestamp after sync
+  timestamp.Timestamp CurrentCommitTS = 1 [(gogoproto.nullable) = false];
+}
+
+// GetCommitRequest get commit timestamp request
+message GetCommitRequest {
+}
+
+// GetCommitResponse get commit timestamp response
+message GetCommitResponse {
+  // CurrentCommitTS current commit timestamp after sync
+  timestamp.Timestamp CurrentCommitTS = 1 [(gogoproto.nullable) = false];
 }
 
 // Request is the query request.
@@ -77,6 +108,11 @@ message Request {
   GetLockInfoRequest GetLockInfoRequest = 8;
   // GetTxnInfoRequest is the request for getting the txn info from the cn
   GetTxnInfoRequest GetTxnInfoRequest = 9;
+  // GetCacheInfoRequest is the request for getting the cache info from the cn,tn
+  GetCacheInfoRequest GetCacheInfoRequest = 10;
+
+  SyncCommitRequest        SycnCommit          = 11;
+  GetCommitRequest        GetCommit           = 12;
 }
 
 // ShowProcessListResponse is the response of command ShowProcessList.
@@ -104,6 +140,11 @@ message Response {
   GetLockInfoResponse GetLockInfoResponse = 8;
   // GetTxnInfoResponse is the response to GetTxnInfo
   GetTxnInfoResponse GetTxnInfoResponse = 9;
+  // GetCacheInfoResponse is the response to GetCacheInfo
+  GetCacheInfoResponse GetCacheInfoResponse = 10;
+
+  SyncCommitResponse        SyncCommit        = 11;
+  GetCommitResponse         GetCommit         = 12;
 }
 
 // AlterAccountRequest is the "alter account restricted" query request.
@@ -187,4 +228,25 @@ message TxnInfo{
 message GetTxnInfoResponse{
   string CnId = 1;
   repeated TxnInfo TxnInfoList = 2;
+}
+
+message GetCacheInfoRequest{}
+
+message CacheInfo{
+  // NodeType is the type of the node. cn, tn
+  string NodeType = 1;
+  // NodeId is the uuid of the node.
+  string NodeId = 2;
+  // CacheType is the type of the cache. memory, disk
+  string CacheType = 3;
+  // Used is the used bytes of the cache for memory cache
+  uint64 Used = 4;
+  // Free is the free bytes of the cache for memory cache
+  uint64 Free = 5;
+  // HitRatio is the hit ratio of the cache.
+  float HitRatio = 6;
+}
+
+message GetCacheInfoResponse{
+  repeated CacheInfo CacheInfoList = 1;
 }

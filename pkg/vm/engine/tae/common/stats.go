@@ -26,18 +26,21 @@ import (
 )
 
 const (
-	DefaultNotLoadMoreThan = 4096
-	DefaultMaxMergeObjN    = 4
+	DefaultNotLoadMoreThan  = 4096
+	DefaultMinRowsQualified = 40960
+	DefaultMaxMergeObjN     = 2
 )
 
 var (
-	RuntimeNotLoadMoreThan atomic.Int32
-	RuntimeMaxMergeObjN    atomic.Int32
+	RuntimeNotLoadMoreThan  atomic.Int32
+	RuntimeMaxMergeObjN     atomic.Int32
+	RuntimeMinRowsQualified atomic.Int32
 )
 
 func init() {
 	RuntimeNotLoadMoreThan.Store(DefaultNotLoadMoreThan)
 	RuntimeMaxMergeObjN.Store(DefaultMaxMergeObjN)
+	RuntimeMinRowsQualified.Store(DefaultMinRowsQualified)
 }
 
 type MergeHistory struct {
@@ -56,6 +59,15 @@ func (h *MergeHistory) Add(osize, nobj, nblk int) {
 
 func (h *MergeHistory) IsLastBefore(d time.Duration) bool {
 	return h.LastTime.Before(time.Now().Add(-d))
+}
+
+func (h *MergeHistory) String() string {
+	return fmt.Sprintf(
+		"(%v) no%v nb%v osize%v",
+		h.LastTime.Format("2006-01-02_15:04:05"),
+		h.NObj, h.NBlk,
+		HumanReadableBytes(h.OSize),
+	)
 }
 
 type TableCompactStat struct {
@@ -98,6 +110,12 @@ func (s *TableCompactStat) AddMerge(osize, nobj, nblk int) {
 	s.Lock()
 	defer s.Unlock()
 	s.MergeHist.Add(osize, nobj, nblk)
+}
+
+func (s *TableCompactStat) GetLastFlush() types.TS {
+	s.RLock()
+	defer s.RUnlock()
+	return s.LastFlush
 }
 
 func (s *TableCompactStat) GetLastMerge() *MergeHistory {

@@ -291,7 +291,7 @@ func (entry *TableEntry) PPString(level common.PPLevel, depth int, prefix string
 	return w.String()
 }
 
-func (entry *TableEntry) ObjectStatsString() string {
+func (entry *TableEntry) ObjectStatsString(level common.PPLevel) string {
 	var w bytes.Buffer
 
 	it := entry.MakeSegmentIt(true)
@@ -299,17 +299,44 @@ func (entry *TableEntry) ObjectStatsString() string {
 	if schema := entry.GetLastestSchema(); schema.HasSortKey() {
 		composeSortKey = strings.HasPrefix(schema.GetSingleSortKey().Name, "__")
 	}
+
+	var cnt, loadedCnt, rows, osize, avgRow, avgOsize int
+
 	for ; it.Valid(); it.Next() {
 		segment := it.Get().GetPayload()
 		if !segment.IsActive() {
 			continue
 		}
-		_ = w.WriteByte('\n')
-		_, _ = w.WriteString(segment.ID.ToString())
-		_ = w.WriteByte('\n')
-		_, _ = w.WriteString("    ")
-		_, _ = w.WriteString(segment.Stat.String(composeSortKey))
+		cnt++
+		if segment.Stat.GetLoaded() {
+			loadedCnt++
+			rows += int(segment.Stat.GetRows())
+			osize += int(segment.Stat.GetOriginSize())
+		}
+		if level > common.PPL0 {
+			_ = w.WriteByte('\n')
+			_, _ = w.WriteString(segment.ID.ToString())
+			_ = w.WriteByte('\n')
+			_, _ = w.WriteString("    ")
+			_, _ = w.WriteString(segment.Stat.String(composeSortKey))
+		}
+		if w.Len() > 8*1024*1024 {
+			w.WriteString("\n...(truncated for too long, more than 8 MB)")
+			break
+		}
 	}
+	if level > common.PPL0 && cnt > 0 {
+		w.WriteByte('\n')
+	}
+	if loadedCnt > 0 {
+		avgRow = rows / cnt
+		avgOsize = osize / cnt
+	}
+	summary := fmt.Sprintf(
+		"summary: %d total, %d unknown, avgRow %d, avgOsize %s",
+		cnt, cnt-loadedCnt, avgRow, common.HumanReadableBytes(avgOsize),
+	)
+	w.WriteString(summary)
 	return w.String()
 }
 
@@ -434,7 +461,7 @@ func (entry *TableEntry) DropSegmentEntry(id *types.Segmentid, txn txnif.AsyncTx
 }
 
 func (entry *TableEntry) RemoveEntry(segment *SegmentEntry) (err error) {
-	logutil.Info("[Catalog]", common.OperationField("remove"),
+	logutil.Debug("[Catalog]", common.OperationField("remove"),
 		common.OperandField(segment.String()))
 	// segment.Close()
 	entry.Lock()
@@ -558,11 +585,18 @@ func (entry *TableEntry) AlterTable(ctx context.Context, txn txnif.TxnReader, re
 
 	newSchema = node.BaseNode.Schema
 	if isNewNode {
-		// Extra info(except seqnnum) is meaningful to the previous version schema
+		// Extra info(except seqnnum etc.) is meaningful to the previous version schema
 		// reset in new Schema
+		var hints []apipb.MergeHint
+		copy(hints, newSchema.Extra.Hints)
 		newSchema.Extra = &apipb.SchemaExtra{
-			NextColSeqnum: newSchema.Extra.NextColSeqnum,
+			NextColSeqnum:    newSchema.Extra.NextColSeqnum,
+			MinRowsQuailifed: newSchema.Extra.MinRowsQuailifed,
+			MaxObjOnerun:     newSchema.Extra.MaxObjOnerun,
+			MaxRowsMergedObj: newSchema.Extra.MaxRowsMergedObj,
+			Hints:            hints,
 		}
+
 	}
 	if err = newSchema.ApplyAlterTable(req); err != nil {
 		return

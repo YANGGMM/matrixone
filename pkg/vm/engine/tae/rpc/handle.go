@@ -18,18 +18,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-
 	"os"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"github.com/matrixorigin/matrixone/pkg/util/fault"
-
 	"github.com/google/shlex"
-	"go.uber.org/zap"
-
 	"github.com/matrixorigin/matrixone/pkg/catalog"
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
@@ -42,6 +37,8 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	"github.com/matrixorigin/matrixone/pkg/pb/txn"
 	"github.com/matrixorigin/matrixone/pkg/perfcounter"
+	"github.com/matrixorigin/matrixone/pkg/util/fault"
+	v2 "github.com/matrixorigin/matrixone/pkg/util/metric/v2"
 	"github.com/matrixorigin/matrixone/pkg/util/trace"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/blockio"
 	catalog2 "github.com/matrixorigin/matrixone/pkg/vm/engine/tae/catalog"
@@ -54,6 +51,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/iface/txnif"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/logtail"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/options"
+	"go.uber.org/zap"
 )
 
 const (
@@ -184,6 +182,9 @@ func (h *Handle) HandleCommit(
 	if txn.Is2PC() {
 		txn.SetCommitTS(types.TimestampToTS(meta.GetCommitTS()))
 	}
+
+	v2.TxnBeforeCommitDurationHistogram.Observe(time.Since(start).Seconds())
+
 	err = txn.Commit(ctx)
 	cts = txn.GetCommitTS().ToTimestamp()
 
@@ -368,7 +369,7 @@ func (h *Handle) handleRequests(
 			}
 			write++
 		default:
-			panic(moerr.NewNYI(ctx, "Pls implement me"))
+			err = moerr.NewNotSupported(ctx, "unknown txn request type: %T", req)
 		}
 		//Need to roll back the txn.
 		if err != nil {
@@ -537,18 +538,14 @@ func (h *Handle) HandleBackup(
 
 	backupTime := time.Now().UTC()
 	currTs := types.BuildTS(backupTime.UnixNano(), 0)
-	err = h.db.ForceCheckpoint(ctx, currTs, timeout)
-	if err != nil {
-		return nil, err
-	}
-	currTs = types.BuildTS(time.Now().UTC().UnixNano(), 0)
-	err = h.db.ForceCheckpoint(ctx, currTs, timeout)
+	var locations string
+	locations += backupTime.Format(time.DateTime) + ";"
+	location, err := h.db.ForceCheckpointForBackup(ctx, currTs, timeout)
 	if err != nil {
 		return nil, err
 	}
 	data := h.db.BGCheckpointRunner.GetAllCheckpoints()
-	var locations string
-	locations += backupTime.Format(time.DateTime) + ";"
+	locations += location + ";"
 	for i := range data {
 		locations += data[i].GetLocation().String()
 		locations += ":"
@@ -582,8 +579,7 @@ func (h *Handle) HandleInspectTN(
 	return nil, nil
 }
 
-func (h *Handle) prefetchDeleteRowID(ctx context.Context,
-	req *db.WriteReq) error {
+func (h *Handle) prefetchDeleteRowID(ctx context.Context, req *db.WriteReq) error {
 	if len(req.DeltaLocs) == 0 {
 		return nil
 	}
@@ -611,56 +607,72 @@ func (h *Handle) prefetchDeleteRowID(ctx context.Context,
 }
 
 func (h *Handle) prefetchMetadata(ctx context.Context,
-	req *db.WriteReq) error {
+	req *db.WriteReq) (int, error) {
 	if len(req.MetaLocs) == 0 {
-		return nil
+		return 0, nil
 	}
 	//start loading jobs asynchronously,should create a new root context.
+	objCnt := 0
 	var objectName objectio.ObjectNameShort
 	for _, meta := range req.MetaLocs {
 		loc, err := blockio.EncodeLocationFromString(meta)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if !objectio.IsSameObjectLocVsShort(loc, &objectName) {
 			err := blockio.PrefetchMeta(h.db.Runtime.Fs.Service, loc)
 			if err != nil {
-				return err
+				return 0, err
 			}
+			objCnt++
 			objectName = *loc.Name().Short()
 		}
 	}
-	return nil
+	return objCnt, nil
 }
 
 // EvaluateTxnRequest only evaluate the request ,do not change the state machine of TxnEngine.
 func (h *Handle) EvaluateTxnRequest(
 	ctx context.Context,
 	meta txn.TxnMeta,
-) (err error) {
+) error {
 	h.mu.RLock()
 	txnCtx := h.mu.txnCtxs[string(meta.GetID())]
 	h.mu.RUnlock()
+
+	metaLocCnt := 0
+	deltaLocCnt := 0
+
+	defer func() {
+		if metaLocCnt != 0 {
+			v2.TxnCNCommittedMetaLocationQuantityGauge.Set(float64(metaLocCnt))
+		}
+
+		if deltaLocCnt != 0 {
+			v2.TxnCNCommittedDeltaLocationQuantityGauge.Set(float64(deltaLocCnt))
+		}
+	}()
+
 	for _, e := range txnCtx.reqs {
 		if r, ok := e.(*db.WriteReq); ok {
 			if r.FileName != "" {
 				if r.Type == db.EntryDelete {
 					// start to load deleted row ids
-					err = h.prefetchDeleteRowID(ctx, r)
-					if err != nil {
-						return
+					deltaLocCnt += len(r.DeltaLocs)
+					if err := h.prefetchDeleteRowID(ctx, r); err != nil {
+						return err
 					}
 				} else if r.Type == db.EntryInsert {
-					err = h.prefetchMetadata(ctx, r)
+					objCnt, err := h.prefetchMetadata(ctx, r)
 					if err != nil {
-						return
+						return err
 					}
-
+					metaLocCnt += objCnt
 				}
 			}
 		}
 	}
-	return
+	return nil
 }
 
 func (h *Handle) CacheTxnRequest(
@@ -826,7 +838,7 @@ func (h *Handle) HandlePreCommitWrite(
 				return err
 			}
 		default:
-			panic(moerr.NewNYI(ctx, ""))
+			return moerr.NewNYI(ctx, "pre commit write type: %T", cmds)
 		}
 	}
 	//evaluate all the txn requests.
@@ -1086,9 +1098,9 @@ func (h *Handle) HandleWrite(
 			} else {
 				logutil.Warnf("multiply blocks in one deltalocation")
 			}
-			rowIDVec := containers.ToTNVector(bat.Vecs[0])
+			rowIDVec := containers.ToTNVector(bat.Vecs[0], common.WorkspaceAllocator)
 			defer rowIDVec.Close()
-			pkVec := containers.ToTNVector(bat.Vecs[1])
+			pkVec := containers.ToTNVector(bat.Vecs[1], common.WorkspaceAllocator)
 			//defer pkVec.Close()
 			if err = tb.DeleteByPhyAddrKeys(rowIDVec, pkVec); err != nil {
 				return
@@ -1099,9 +1111,9 @@ func (h *Handle) HandleWrite(
 	if len(req.Batch.Vecs) != 2 {
 		panic(fmt.Sprintf("req.Batch.Vecs length is %d, should be 2", len(req.Batch.Vecs)))
 	}
-	rowIDVec := containers.ToTNVector(req.Batch.GetVector(0))
+	rowIDVec := containers.ToTNVector(req.Batch.GetVector(0), common.WorkspaceAllocator)
 	defer rowIDVec.Close()
-	pkVec := containers.ToTNVector(req.Batch.GetVector(1))
+	pkVec := containers.ToTNVector(req.Batch.GetVector(1), common.WorkspaceAllocator)
 	//defer pkVec.Close()
 	err = tb.DeleteByPhyAddrKeys(rowIDVec, pkVec)
 	return
@@ -1158,6 +1170,42 @@ func (h *Handle) HandleTraceSpan(ctx context.Context,
 	meta txn.TxnMeta,
 	req *db.TraceSpan,
 	resp *api.SyncLogTailResp) (func(), error) {
+
+	return nil, nil
+}
+
+//var visitBlkEntryForStorageUsage = func(h *Handle, resp *db.StorageUsageResp, lastCkpEndTS types.TS) {
+//	processor := new(catalog2.LoopProcessor)
+//	processor.SegmentFn = func(blkEntry *catalog2.SegmentEntry) error {
+//
+//		return nil
+//	}
+//
+//	h.db.Catalog.RecurLoop(processor)
+//}
+
+func (h *Handle) HandleStorageUsage(ctx context.Context, meta txn.TxnMeta,
+	req *db.StorageUsage, resp *db.StorageUsageResp) (func(), error) {
+
+	// get all checkpoints.
+	//var ckp *checkpoint.CheckpointEntry
+	// [g_ckp, i_ckp, i_ckp, ...] (if g exist)
+	allCkp := h.db.BGCheckpointRunner.GetAllCheckpoints()
+	for idx := range allCkp {
+		resp.CkpEntries = append(resp.CkpEntries, &db.CkpMetaInfo{
+			Version:  allCkp[idx].GetVersion(),
+			Location: allCkp[idx].GetLocation(),
+		})
+	}
+
+	resp.Succeed = true
+
+	// TODO
+	// exist a gap!
+	// collecting block entries that have been not been checkpoint yet
+	//if lastCkpTS.Less(types.BuildTS(time.Now().UTC().UnixNano(), 0)) {
+	//	visitBlkEntryForStorageUsage(h, resp, lastCkpTS)
+	//}
 
 	return nil, nil
 }

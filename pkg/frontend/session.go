@@ -249,6 +249,8 @@ type Session struct {
 	queryEnd time.Time
 	// queryInProgress indicates whether the query is in progress
 	queryInProgress atomic.Bool
+	// queryInExecute indicates whether the query is in execute
+	queryInExecute atomic.Bool
 }
 
 func (ses *Session) ClearStmtProfile() {
@@ -327,6 +329,14 @@ func (ses *Session) SetQueryInProgress(b bool) {
 
 func (ses *Session) GetQueryInProgress() bool {
 	return ses.queryInProgress.Load()
+}
+
+func (ses *Session) SetQueryInExecute(b bool) {
+	ses.queryInExecute.Store(b)
+}
+
+func (ses *Session) GetQueryInExecute() bool {
+	return ses.queryInExecute.Load()
 }
 
 func (ses *Session) SetSqlOfStmt(sot string) {
@@ -573,6 +583,7 @@ func NewSession(proto Protocol, mp *mpool.MPool, pu *config.ParameterUnit,
 		pu.LockService,
 		pu.QueryService,
 		pu.HAKeeperClient,
+		pu.UdfService,
 		ses.GetAutoIncrCacheManager())
 	ses.proc.SetStmtProfile(&ses.stmtProfile)
 
@@ -2109,7 +2120,6 @@ func (ses *Session) getGlobalSystemVariableValue(varName string) (interface{}, e
 		return nil, err
 	}
 
-	tenantInfo := ses.GetTenantInfo()
 	bh := ses.GetBackgroundExec(ctx)
 	defer bh.Close()
 
@@ -2120,7 +2130,9 @@ func (ses *Session) getGlobalSystemVariableValue(varName string) (interface{}, e
 	if err != nil {
 		return nil, err
 	}
-	accountId = tenantInfo.GetTenantID()
+	if tenantInfo := ses.GetTenantInfo(); tenantInfo != nil {
+		accountId = tenantInfo.GetTenantID()
+	}
 	sql = getSqlForGetSystemVariableValueWithAccount(uint64(accountId), varName)
 
 	bh.ClearExecResultSet()
@@ -2228,7 +2240,7 @@ func uuid2Str(uid uuid.UUID) string {
 	if bytes.Equal(uid[:], dumpUUID[:]) {
 		return ""
 	}
-	return uid.String()
+	return strings.ReplaceAll(uid.String(), "-", "")
 }
 
 func (ses *Session) SetSessionRoutineStatus(status string) error {
