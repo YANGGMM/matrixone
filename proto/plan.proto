@@ -302,6 +302,9 @@ message IndexDef {
 	bool visible          = 8;
 	// currently not used
 	IndexOption option		  = 9;
+	string index_algo = 10;
+	string index_algo_table_type = 11;
+	string index_algo_params=12;
 }
 
 
@@ -533,6 +536,11 @@ message WindowSpec {
 	repeated OrderBySpec order_by = 3;
 	FrameClause frame = 4;
 	string name = 5;
+}
+
+message SampleFuncSpec {
+	int32 Rows = 1;
+	double Percent = 2;
 }
 
 message FrameClause {
@@ -783,6 +791,9 @@ message Node {
 
 	FillType fill_type = 49;
 	repeated Expr fill_val = 50;
+
+	// sample function related.
+	SampleFuncSpec sample_func = 51;
 }
 
 message ExternScan {
@@ -792,6 +803,7 @@ message ExternScan {
     uint64 ignored_lines = 4;
     bytes  enclosed_by = 5;
     string terminated = 6;
+	string json_type = 7;
 }
 
 message LockTarget {
