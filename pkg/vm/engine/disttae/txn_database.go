@@ -16,6 +16,7 @@ package disttae
 
 import (
 	"context"
+	"runtime/debug"
 	"strconv"
 	"strings"
 
@@ -165,7 +166,7 @@ func (db *txnDatabase) Relation(ctx context.Context, name string, proc any) (eng
 	}
 	if ok := db.txn.engine.catalog.GetTable(item); !ok {
 		logutil.Debugf("txnDatabase.Relation table %q(acc %d db %d) does not exist", name, defines.GetAccountId(ctx), db.databaseId)
-		return nil, moerr.NewParseError(ctx, "table %q does not exist", name)
+		return nil, moerr.NewParseError(ctx, "table %q does not exist, debug stack: %s", name, debug.Stack())
 	}
 
 	tbl := &txnTable{
