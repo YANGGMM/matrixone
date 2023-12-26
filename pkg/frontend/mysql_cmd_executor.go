@@ -2735,10 +2735,12 @@ func (mce *MysqlCmdExecutor) executeStmt(requestCtx context.Context,
 			}
 
 			if st, ok := cw.GetAst().(*tree.CreateDatabase); ok {
+				_ = insertRecordToMoMysqlCompatibilityMode(requestCtx, ses, stmt)
 				_ = doGrantPrivilegeImplicitly(requestCtx, ses, st)
 			}
 
 			if st, ok := cw.GetAst().(*tree.DropDatabase); ok {
+				_ = deleteRecordToMoMysqlCompatbilityMode(requestCtx, ses, stmt)
 				_ = doRevokePrivilegeImplicitly(requestCtx, ses, st)
 			}
 
@@ -2956,6 +2958,10 @@ func (mce *MysqlCmdExecutor) executeStmt(requestCtx context.Context,
 		st.Name.SetConfig(v.(int64))
 		//use database
 		err = mce.handleChangeDB(requestCtx, st.Name.Compare())
+		if err != nil {
+			return
+		}
+		err = changeVersion(requestCtx, ses, st.Name.Compare())
 		if err != nil {
 			return
 		}
