@@ -1071,13 +1071,6 @@ var (
 	dropMoIndexes                   = fmt.Sprintf(`drop table if exists %s.%s;`, catalog.MO_CATALOG, catalog.MO_INDEXES)
 	dropMoTablePartitions           = fmt.Sprintf(`drop table if exists %s.%s;`, catalog.MO_CATALOG, catalog.MO_TABLE_PARTITIONS)
 
-	initMoMysqlCompatbilityModeFormat = `insert into mo_catalog.mo_mysql_compatibility_mode(
-		account_id,
-		account_name,
-		dat_name,
-		variable_name,
-		variable_value, system_variables) values (%d, "%s", "%s", "%s", "%s", %v);`
-
 	initMoMysqlCompatbilityModeWithoutDataBaseFormat = `insert into mo_catalog.mo_mysql_compatibility_mode(
 		account_id,
 		account_name,
@@ -1495,9 +1488,6 @@ const (
 
 	// delete stored procedure from mo_user_defined_function
 	deleteStoredProcedureFormat = `delete from mo_catalog.mo_stored_procedure where proc_id = %d;`
-
-	// delete a tuple from mo_mysql_compatibility_mode when drop a database
-	deleteMysqlCompatbilityModeFormat = `delete from mo_catalog.mo_mysql_compatibility_mode where dat_name = "%s";`
 
 	getSystemVariableValueWithDatabaseFormat = `select variable_value from mo_catalog.mo_mysql_compatibility_mode where dat_name = "%s" and variable_name = "%s";`
 
@@ -1978,10 +1968,6 @@ func getSqlForDeleteUser(userId int64) []string {
 		fmt.Sprintf(deleteUserFromMoUserFormat, userId),
 		fmt.Sprintf(deleteUserFromMoUserGrantFormat, userId),
 	}
-}
-
-func getSqlForDeleteMysqlCompatbilityMode(dtname string) string {
-	return fmt.Sprintf(deleteMysqlCompatbilityModeFormat, dtname)
 }
 
 func getSqlForGetSystemVariableValueWithDatabase(dtname, variable_name string) string {
