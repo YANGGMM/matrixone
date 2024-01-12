@@ -2961,10 +2961,6 @@ func (mce *MysqlCmdExecutor) executeStmt(requestCtx context.Context,
 		if err != nil {
 			return
 		}
-		err = changeVersion(requestCtx, ses, st.Name.Compare())
-		if err != nil {
-			return
-		}
 	case *tree.MoDump:
 		selfHandle = true
 		//dump
