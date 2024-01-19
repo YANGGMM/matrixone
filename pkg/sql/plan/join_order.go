@@ -348,6 +348,63 @@ func (builder *QueryBuilder) gatherJoinLeavesAndConds(joinNode *plan.Node, leave
 	return leaves, conds
 }
 
+// func (builder *QueryBuilder) generateJoinGraph(leaves []*plan.Node, conds []*plan.Expr) []*joinVertex {
+// 	vertices := make([]*joinVertex, len(leaves))
+// 	tag2Vert := make(map[int32]int32)
+
+// 	for i, node := range leaves {
+// 		vertices[i] = &joinVertex{
+// 			node:     node,
+// 			children: make(map[int32]emptyType),
+// 			parent:   -1,
+// 		}
+
+// 		for _, tag := range builder.enumerateTags(node.NodeId) {
+// 			tag2Vert[tag] = int32(i)
+// 		}
+// 	}
+
+// 	edgeMap := make(map[[2]int32]*joinEdge)
+// 	for _, cond := range conds {
+// 		ok, leftCol, rightCol := checkStrictJoinPred(cond)
+// 		if !ok {
+// 			continue
+// 		}
+// 		var leftId, rightId int32
+// 		if leftId, ok = tag2Vert[leftCol.RelPos]; !ok {
+// 			continue
+// 		}
+// 		if rightId, ok = tag2Vert[rightCol.RelPos]; !ok {
+// 			continue
+// 		}
+// 		if leftId > rightId {
+// 			leftId, rightId = rightId, leftId
+// 			leftCol, rightCol = rightCol, leftCol
+// 		}
+
+// 		edge := edgeMap[[2]int32{leftId, rightId}]
+// 		if edge == nil {
+// 			edge = &joinEdge{}
+// 			edge.leftCols = append(edge.leftCols, leftCol.ColPos)
+// 			edge.rightCols = append(edge.rightCols, rightCol.ColPos)
+// 			edgeMap[[2]int32{leftId, rightId}] = edge
+// 		}
+
+// 		leftParent := vertices[leftId].parent
+// 		if isHighNdvCols(edge.leftCols, builder.tag2Table[leftCol.RelPos], builder) {
+// 			if leftParent == -1 || shouldChangeParent(leftId, leftParent, rightId, vertices) {
+// 				if vertices[rightId].parent != leftId {
+// 					setParent(leftId, rightId, vertices)
+// 				} else if vertices[leftId].node.Stats.Outcnt < vertices[rightId].node.Stats.Outcnt {
+// 					unsetParent(rightId, leftId, vertices)
+// 					setParent(leftId, rightId, vertices)
+// 				}
+// 			}
+// 		}
+// 	}
+
+// }
+
 func (builder *QueryBuilder) getJoinGraph(leaves []*plan.Node, conds []*plan.Expr) []*joinVertex {
 	vertices := make([]*joinVertex, len(leaves))
 	tag2Vert := make(map[int32]int32)
@@ -366,59 +423,57 @@ func (builder *QueryBuilder) getJoinGraph(leaves []*plan.Node, conds []*plan.Exp
 
 	edgeMap := make(map[[2]int32]*joinEdge)
 
-	for i := 0; i < 2; i++ {
-		for _, cond := range conds {
-			ok, leftCol, rightCol := checkStrictJoinPred(cond)
-			if !ok {
-				continue
-			}
-			var leftId, rightId int32
-			if leftId, ok = tag2Vert[leftCol.RelPos]; !ok {
-				continue
-			}
-			if rightId, ok = tag2Vert[rightCol.RelPos]; !ok {
-				continue
-			}
+	for _, cond := range conds {
+		ok, leftCol, rightCol := checkStrictJoinPred(cond)
+		if !ok {
+			continue
+		}
+		var leftId, rightId int32
+		if leftId, ok = tag2Vert[leftCol.RelPos]; !ok {
+			continue
+		}
+		if rightId, ok = tag2Vert[rightCol.RelPos]; !ok {
+			continue
+		}
 
-			if leftId > rightId {
-				leftId, rightId = rightId, leftId
-				leftCol, rightCol = rightCol, leftCol
-			}
+		if leftId > rightId {
+			leftId, rightId = rightId, leftId
+			leftCol, rightCol = rightCol, leftCol
+		}
 
-			edge := edgeMap[[2]int32{leftId, rightId}]
-			if i == 0 {
-				if edge == nil {
-					edge = &joinEdge{}
-				}
-				edge.leftCols = append(edge.leftCols, leftCol.ColPos)
-				edge.rightCols = append(edge.rightCols, rightCol.ColPos)
-				edgeMap[[2]int32{leftId, rightId}] = edge
-			}
+		edge := edgeMap[[2]int32{leftId, rightId}]
 
-			leftParent := vertices[leftId].parent
-			if isHighNdvCols(edge.leftCols, builder.tag2Table[leftCol.RelPos], builder) {
-				if leftParent == -1 || shouldChangeParent(leftId, leftParent, rightId, vertices) {
-					if vertices[rightId].parent != leftId {
-						setParent(leftId, rightId, vertices)
-					} else if vertices[leftId].node.Stats.Outcnt < vertices[rightId].node.Stats.Outcnt {
-						unsetParent(rightId, leftId, vertices)
-						setParent(leftId, rightId, vertices)
-					}
+		if edge == nil {
+			edge = &joinEdge{}
+		}
+		edge.leftCols = append(edge.leftCols, leftCol.ColPos)
+		edge.rightCols = append(edge.rightCols, rightCol.ColPos)
+		edgeMap[[2]int32{leftId, rightId}] = edge
+
+		leftParent := vertices[leftId].parent
+		if isHighNdvCols(edge.leftCols, builder.tag2Table[leftCol.RelPos], builder) {
+			if leftParent == -1 || shouldChangeParent(leftId, leftParent, rightId, vertices) {
+				if vertices[rightId].parent != leftId {
+					setParent(leftId, rightId, vertices)
+				} else if vertices[leftId].node.Stats.Outcnt < vertices[rightId].node.Stats.Outcnt {
+					unsetParent(rightId, leftId, vertices)
+					setParent(leftId, rightId, vertices)
 				}
 			}
-			rightParent := vertices[rightId].parent
-			if isHighNdvCols(edge.rightCols, builder.tag2Table[rightCol.RelPos], builder) {
-				if rightParent == -1 || shouldChangeParent(rightId, rightParent, leftId, vertices) {
-					if vertices[leftId].parent != rightId {
-						setParent(rightId, leftId, vertices)
-					} else if vertices[rightId].node.Stats.Outcnt < vertices[leftId].node.Stats.Outcnt {
-						unsetParent(leftId, rightId, vertices)
-						setParent(rightId, leftId, vertices)
-					}
+		}
+		rightParent := vertices[rightId].parent
+		if isHighNdvCols(edge.rightCols, builder.tag2Table[rightCol.RelPos], builder) {
+			if rightParent == -1 || shouldChangeParent(rightId, rightParent, leftId, vertices) {
+				if vertices[leftId].parent != rightId {
+					setParent(rightId, leftId, vertices)
+				} else if vertices[rightId].node.Stats.Outcnt < vertices[leftId].node.Stats.Outcnt {
+					unsetParent(leftId, rightId, vertices)
+					setParent(rightId, leftId, vertices)
 				}
 			}
 		}
 	}
+
 	return vertices
 }
 
