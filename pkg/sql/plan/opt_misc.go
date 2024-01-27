@@ -1154,3 +1154,163 @@ func (builder *QueryBuilder) pushdownLimit(nodeID int32) {
 		}
 	}
 }
+
+// table scan(filter using unique index)
+//
+//	|
+//	|
+//	|
+//
+// index table(filter)
+//
+//	->   join on pk
+//
+// table scan
+
+func (builder *QueryBuilder) useUniqueSecondaryIndices(nodeId int32) int32 {
+	node := builder.qry.Nodes[nodeId]
+	if len(node.Children) > 0 {
+		for i, child := range node.Children {
+			node.Children[i] = builder.useUniqueSecondaryIndices(child)
+		}
+	}
+
+	if node.NodeType != plan.Node_TABLE_SCAN || len(node.FilterList) == 0 || len(node.TableDef.GetIndexes()) == 0 {
+		return nodeId
+	}
+
+	colName2Index := make(map[string]int)
+	for i, index := range node.TableDef.GetIndexes() {
+		if len(index.GetParts()) == 1 {
+			colName2Index[index.GetParts()[0]] = i
+		}
+	}
+
+	for i, expr := range node.GetFilterList() {
+		if expr.Expr == nil {
+			continue
+		}
+
+		// must function expr
+		fn, ok := expr.Expr.(*plan.Expr_F)
+		if !ok {
+			continue
+		}
+
+		// must equal function
+		if !IsEqualFunc(fn.F.Func.GetObj()) {
+			continue
+		}
+
+		// must have two args and left arg must be column and right arg must be constant
+		if len(fn.F.Args) != 2 {
+			continue
+		}
+
+		leftCol, ok := fn.F.Args[0].Expr.(*plan.Expr_Col)
+		if !ok {
+			continue
+		}
+
+		_, ok = fn.F.Args[1].Expr.(*plan.Expr_Lit)
+		if !ok {
+			continue
+		}
+
+		// if left col is not in index, continue
+		index, ok := colName2Index[leftCol.Col.Name]
+		if !ok {
+			continue
+		}
+
+		idxTag := builder.genNewTag()
+		rfTag := builder.genNewTag()
+
+		// need add index table scan filter and then remove the filter from current node
+		// first change col ref to index table col ref
+		idxCol := &plan.Expr{
+			Typ: DeepCopyType(fn.F.Args[0].Typ),
+			Expr: &plan.Expr_Col{
+				Col: &plan.ColRef{
+					RelPos: idxTag,
+					ColPos: 0, // unidex col
+				},
+			},
+		}
+		// then change expr left col to index table col ref
+		fn.F.Args[0] = idxCol
+
+		// resolve index table
+		idxObj, idxRef := builder.compCtx.Resolve(node.ObjRef.SchemaName, node.TableDef.Indexes[index].IndexTableName)
+		// build table scan node for indexCol and add filter
+		idxTableNodeID := builder.appendNode(&plan.Node{
+			NodeType:        plan.Node_TABLE_SCAN,
+			ObjRef:          idxObj,
+			TableDef:        idxRef,
+			Stats:           nil,
+			BindingTags:     []int32{idxTag},
+			FilterList:      []*plan.Expr{expr},
+			BlockFilterList: []*plan.Expr{DeepCopyExpr(expr)},
+		}, builder.ctxByNode[nodeId])
+
+		pkIdx := node.TableDef.Name2ColIndex[node.TableDef.Pkey.PkeyColName]
+		pkExpr := &plan.Expr{
+			Typ: DeepCopyType(node.TableDef.Cols[pkIdx].Typ),
+			Expr: &plan.Expr_Col{
+				Col: &plan.ColRef{
+					RelPos: node.BindingTags[0],
+					ColPos: pkIdx,
+				},
+			},
+		}
+
+		node.FilterList = append(node.FilterList[:i], node.FilterList[i+1:]...)
+		node.RuntimeFilterProbeList = []*plan.RuntimeFilterSpec{
+			{
+				Tag:  rfTag,
+				Expr: pkExpr,
+			},
+		}
+
+		// join with pk col
+		joinCond, _ := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*plan.Expr{
+			DeepCopyExpr(pkExpr),
+			{
+				Typ: DeepCopyType(pkExpr.Typ),
+				Expr: &plan.Expr_Col{
+					Col: &plan.ColRef{
+						RelPos: idxTag,
+						ColPos: 1, // pk col
+					},
+				},
+			},
+		})
+
+		joinNodeID := builder.appendNode(&plan.Node{
+			NodeType: plan.Node_JOIN,
+			Children: []int32{nodeId, idxTableNodeID},
+			OnList:   []*plan.Expr{joinCond},
+			RuntimeFilterBuildList: []*plan.RuntimeFilterSpec{
+				{
+					Tag: rfTag,
+					Expr: &plan.Expr{
+						Typ: DeepCopyType(pkExpr.Typ),
+						Expr: &plan.Expr_Col{
+							Col: &plan.ColRef{
+								RelPos: 0,
+								ColPos: 0,
+							},
+						},
+					},
+				},
+			},
+		}, builder.ctxByNode[nodeId])
+
+		nodeId = joinNodeID
+		break
+
+	}
+
+	return nodeId
+
+}
