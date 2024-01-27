@@ -1154,3 +1154,315 @@ func (builder *QueryBuilder) pushdownLimit(nodeID int32) {
 		}
 	}
 }
+
+// func (builder *QueryBuilder) autoUseIndices(nodeID int32) int32 {
+// 	node := builder.qry.Nodes[nodeID]
+
+// }
+
+func (builder *QueryBuilder) useIndicesForPointSelect(nodeID int32, node *plan.Node) int32 {
+	if len(node.FilterList) == 0 || len(node.TableDef.Indexes) == 0 {
+		return nodeID
+	}
+
+	col2filter := make(map[int32]int)
+
+	for i, expr := range node.FilterList {
+		fn, ok := expr.Expr.(*plan.Expr_F)
+		if !ok {
+			continue
+		}
+		if !IsEqualFunc(fn.F.Func.Obj) {
+			continue
+		}
+
+		if _, ok := fn.F.Args[0].Expr.(*plan.Expr_Lit); ok {
+			if _, ok := fn.F.Args[1].Expr.(*plan.Expr_Col); ok {
+				fn.F.Args[0], fn.F.Args[1] = fn.F.Args[1], fn.F.Args[0]
+			}
+		}
+
+		col, ok := fn.F.Args[0].Expr.(*plan.Expr_Col)
+		if !ok {
+			continue
+		}
+		if _, ok := fn.F.Args[1].Expr.(*plan.Expr_Lit); !ok {
+			continue
+		}
+
+		col2filter[col.Col.ColPos] = i
+	}
+
+	filterIdx := make([]int, 0, len(col2filter))
+	for _, idxDef := range node.TableDef.Indexes {
+		if !idxDef.Unique {
+			continue
+		}
+
+		filterIdx = filterIdx[:0]
+		for _, part := range idxDef.Parts {
+			colIdx := node.TableDef.Name2ColIndex[part]
+			idx, ok := col2filter[colIdx]
+			if !ok {
+				break
+			}
+
+			filterIdx = append(filterIdx, idx)
+		}
+
+		if len(filterIdx) != len(idxDef.Parts) {
+			continue
+		}
+
+		idxTag := builder.genNewTag()
+		idxObjRef, idxTableDef := builder.compCtx.Resolve(node.ObjRef.SchemaName, idxDef.IndexTableName)
+
+		builder.nameByColRef[[2]int32{idxTag, 0}] = idxTableDef.Name + "." + idxTableDef.Cols[0].Name
+		builder.nameByColRef[[2]int32{idxTag, 1}] = idxTableDef.Name + "." + idxTableDef.Cols[1].Name
+
+		var idxFilter *plan.Expr
+		if len(idxDef.Parts) == 1 {
+			idx := filterIdx[0]
+
+			idxFilter = node.FilterList[idx]
+			col := idxFilter.Expr.(*plan.Expr_F).F.Args[0].Expr.(*plan.Expr_Col).Col
+			col.RelPos = idxTag
+			col.ColPos = 0
+
+			node.FilterList = append(node.FilterList[:idx], node.FilterList[idx+1:]...)
+		} else {
+			serialArgs := make([]*plan.Expr, len(filterIdx))
+			for i := range filterIdx {
+				serialArgs[i] = node.FilterList[filterIdx[i]].Expr.(*plan.Expr_F).F.Args[1]
+			}
+			rightArg, _ := BindFuncExprImplByPlanExpr(builder.GetContext(), "serial", serialArgs)
+			idxFilter, _ = BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*plan.Expr{
+				{
+					Typ: DeepCopyType(idxTableDef.Cols[0].Typ),
+					Expr: &plan.Expr_Col{
+						Col: &plan.ColRef{
+							RelPos: idxTag,
+							ColPos: 0,
+						},
+					},
+				},
+				rightArg,
+			})
+
+			hitFilterSet := make(map[int]emptyType)
+			for i := range filterIdx {
+				hitFilterSet[filterIdx[i]] = emptyStruct
+			}
+
+			newFilterList := make([]*plan.Expr, 0, len(node.FilterList)-len(filterIdx))
+			for i, filter := range node.FilterList {
+				if _, ok := hitFilterSet[i]; !ok {
+					newFilterList = append(newFilterList, filter)
+				}
+			}
+
+			node.FilterList = newFilterList
+		}
+
+		idxTableNodeID := builder.appendNode(&plan.Node{
+			NodeType:        plan.Node_TABLE_SCAN,
+			ObjRef:          idxObjRef,
+			TableDef:        idxTableDef,
+			FilterList:      []*plan.Expr{idxFilter},
+			BlockFilterList: []*plan.Expr{DeepCopyExpr(idxFilter)},
+			BindingTags:     []int32{idxTag},
+		}, builder.ctxByNode[nodeID])
+
+		pkIdx := node.TableDef.Name2ColIndex[node.TableDef.Pkey.PkeyColName]
+		pkExpr := &plan.Expr{
+			Typ: DeepCopyType(node.TableDef.Cols[pkIdx].Typ),
+			Expr: &plan.Expr_Col{
+				Col: &plan.ColRef{
+					RelPos: node.BindingTags[0],
+					ColPos: pkIdx,
+				},
+			},
+		}
+
+		joinCond, _ := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*plan.Expr{
+			pkExpr,
+			{
+				Typ: DeepCopyType(pkExpr.Typ),
+				Expr: &plan.Expr_Col{
+					Col: &plan.ColRef{
+						RelPos: idxTag,
+						ColPos: 1,
+					},
+				},
+			},
+		})
+		joinNodeID := builder.appendNode(&plan.Node{
+			NodeType: plan.Node_JOIN,
+			Children: []int32{nodeID, idxTableNodeID},
+			OnList:   []*plan.Expr{joinCond},
+		}, builder.ctxByNode[nodeID])
+
+		ReCalcNodeStats(nodeID, builder, false, true, true)
+		nodeID = joinNodeID
+
+		break
+	}
+
+	return nodeID
+}
+
+func (builder *QueryBuilder) useIndicesForPointSelectWithMultiColumn(nodeId int32) int32 {
+	node := builder.qry.Nodes[nodeId]
+	if len(node.FilterList) == 0 || len(node.TableDef.Indexes) == 0 {
+		return nodeId
+	}
+
+	col2filter := make(map[int32]int)
+
+	for i, expr := range node.FilterList {
+		fn, ok := expr.Expr.(*plan.Expr_F)
+		if !ok {
+			continue
+		}
+		if !IsEqualFunc(fn.F.Func.Obj) {
+			continue
+		}
+
+		if _, ok := fn.F.Args[0].Expr.(*plan.Expr_Lit); ok {
+			if _, ok := fn.F.Args[1].Expr.(*plan.Expr_Col); ok {
+				fn.F.Args[0], fn.F.Args[1] = fn.F.Args[1], fn.F.Args[0]
+			}
+		}
+
+		col, ok := fn.F.Args[0].Expr.(*plan.Expr_Col)
+		if !ok {
+			continue
+		}
+		if _, ok := fn.F.Args[1].Expr.(*plan.Expr_Lit); !ok {
+			continue
+		}
+
+		col2filter[col.Col.ColPos] = i
+	}
+
+	filterIdx := make([]int, 0, len(col2filter))
+	for _, idxDef := range node.TableDef.Indexes {
+		// if not unique index, continue
+		if !idxDef.Unique {
+			continue
+		}
+
+		filterIdx = filterIdx[:0]
+		for _, part := range idxDef.Parts {
+			colIdx := node.TableDef.Name2ColIndex[part]
+			idx, ok := col2filter[colIdx]
+			if !ok {
+				break
+			}
+
+			filterIdx = append(filterIdx, idx)
+		}
+
+		// if not all columns in index, continue
+		if len(filterIdx) != len(idxDef.Parts) {
+			continue
+		}
+
+		idxTag := builder.genNewTag()
+		idxObjRef, idxTableDef := builder.compCtx.Resolve(node.ObjRef.SchemaName, idxDef.IndexTableName)
+
+		builder.nameByColRef[[2]int32{idxTag, 0}] = idxTableDef.Name + "." + idxTableDef.Cols[0].Name
+		builder.nameByColRef[[2]int32{idxTag, 1}] = idxTableDef.Name + "." + idxTableDef.Cols[1].Name
+
+		var idxFilter *plan.Expr
+		if len(idxDef.Parts) == 1 {
+			idx := filterIdx[0]
+			idxFilter = node.FilterList[idx]
+			col := idxFilter.Expr.(*plan.Expr_F).F.Args[0].Expr.(*plan.Expr_Col).Col
+			col.RelPos = idxTag
+			col.ColPos = 0 // uinque index
+		} else {
+			// important
+			// if index is multi-column, we need to use serial function to generate a new column
+			// and use this column to join with the table
+			// 主要目的是为了过滤index table中的数据,所以需要搞清楚 复合unique index table的 结构
+			// 从文档中可知： 如果原表中含有两个及以上的唯一索引，会创建多张索引表
+
+			serialArgs := make([]*plan.Expr, len(filterIdx))
+			for i := range filterIdx {
+				serialArgs[i] = node.FilterList[filterIdx[i]].Expr.(*plan.Expr_F).F.Args[1]
+			}
+			rightArg, _ := BindFuncExprImplByPlanExpr(builder.GetContext(), "serial", serialArgs)
+			idxFilter, _ = BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*plan.Expr{
+				{
+					Typ: DeepCopyType(idxTableDef.Cols[0].Typ),
+					Expr: &plan.Expr_Col{
+						Col: &plan.ColRef{
+							RelPos: idxTag,
+							ColPos: 0,
+						},
+					},
+				},
+				rightArg,
+			})
+
+			hitFilterSet := make(map[int]emptyType)
+			for i := range filterIdx {
+				hitFilterSet[filterIdx[i]] = emptyStruct
+			}
+
+			newFilterList := make([]*plan.Expr, 0, len(node.FilterList)-len(filterIdx))
+			for i, filter := range node.FilterList {
+				if _, ok := hitFilterSet[i]; !ok {
+					newFilterList = append(newFilterList, filter)
+				}
+			}
+
+			node.FilterList = newFilterList
+		}
+
+		idxTableNodeID := builder.appendNode(&plan.Node{
+			NodeType:        plan.Node_TABLE_SCAN,
+			ObjRef:          idxObjRef,
+			TableDef:        idxTableDef,
+			FilterList:      []*plan.Expr{idxFilter},
+			BlockFilterList: []*plan.Expr{DeepCopyExpr(idxFilter)},
+			BindingTags:     []int32{idxTag},
+		}, builder.ctxByNode[nodeId])
+
+		pkIdx := node.TableDef.Name2ColIndex[node.TableDef.Pkey.PkeyColName]
+		pkExpr := &plan.Expr{
+			Typ: DeepCopyType(node.TableDef.Cols[pkIdx].Typ),
+			Expr: &plan.Expr_Col{
+				Col: &plan.ColRef{
+					RelPos: node.BindingTags[0],
+					ColPos: pkIdx,
+				},
+			},
+		}
+
+		joinCond, _ := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*plan.Expr{
+			pkExpr,
+			{
+				Typ: DeepCopyType(pkExpr.Typ),
+				Expr: &plan.Expr_Col{
+					Col: &plan.ColRef{
+						RelPos: idxTag,
+						ColPos: 1,
+					},
+				},
+			},
+		})
+		joinNodeID := builder.appendNode(&plan.Node{
+			NodeType: plan.Node_JOIN,
+			Children: []int32{nodeId, idxTableNodeID},
+			OnList:   []*plan.Expr{joinCond},
+		}, builder.ctxByNode[nodeId])
+
+		ReCalcNodeStats(nodeId, builder, false, true, true)
+		nodeId = joinNodeID
+
+		break
+	}
+	return nodeId
+}
