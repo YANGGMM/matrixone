@@ -1190,7 +1190,7 @@ func (builder *QueryBuilder) appleIndexForInExpression(nodeId int32, node *plan.
 		pkIdxPos = node.TableDef.Name2ColIndex[node.TableDef.Pkey.Names[0]]
 	}
 
-	for _, expr := range node.FilterList {
+	for i, expr := range node.FilterList {
 		fn, ok := expr.Expr.(*plan.Expr_F)
 		if !ok {
 			continue
@@ -1243,6 +1243,8 @@ func (builder *QueryBuilder) appleIndexForInExpression(nodeId int32, node *plan.
 			idxFilter, _ = BindFuncExprImplByPlanExpr(builder.GetContext(), "in", args)
 		}
 
+		node.FilterList = append(node.FilterList[:i], node.FilterList[i+1:]...)
+
 		idxTableScan := builder.appendNode(&plan.Node{
 			NodeType:    plan.Node_TABLE_SCAN,
 			TableDef:    idxDef,
@@ -1284,9 +1286,154 @@ func (builder *QueryBuilder) appleIndexForInExpression(nodeId int32, node *plan.
 			BindingTags: []int32{node.BindingTags[0], idxTag},
 		}, builder.ctxByNode[nodeId])
 
+		ReCalcNodeStats(joinNodeId, builder, true, true, true)
+
 		nodeId = joinNodeId
 		break
 	}
 	return nodeId
+}
 
+// tableScan(filter: BetweenExpr)
+//  |
+//  |
+//  |
+//  tableScan join on pk indexTableScan(filter : BetweenExpr)
+
+// appleIndexForBetweenExprExpression will try to use index which only has one column for BetweenExpr
+func (builder *QueryBuilder) appleIndexForBetweenExpression(nodeId int32, node *plan.Node) int32 {
+
+	if node.NodeType != plan.Node_TABLE_SCAN || len(node.GetFilterList()) == 0 || len(node.TableDef.Indexes) == 0 {
+		return nodeId
+	}
+
+	colPos2Idx := make(map[int32]int)
+	for i, idx := range node.TableDef.Indexes {
+		if !idx.TableExist {
+			continue
+		}
+
+		numParts := len(idx.Parts)
+		if !idx.Unique {
+			numParts--
+		}
+
+		// only one column index
+		if numParts == 1 {
+			colPos2Idx[node.TableDef.Name2ColIndex[idx.Parts[0]]] = i
+		}
+	}
+
+	// get pk index pos
+	var pkIdxPos int32 = -1
+	if len(node.TableDef.Pkey.Names) == 1 {
+		pkIdxPos = node.TableDef.Name2ColIndex[node.TableDef.Pkey.Names[0]]
+	}
+
+	for i, expr := range node.FilterList {
+		fn, ok := expr.Expr.(*plan.Expr_F)
+		if !ok {
+			continue
+		}
+
+		if fn.F.Func.ObjName != "between" {
+			continue
+		}
+
+		col, ok := fn.F.Args[0].Expr.(*plan.Expr_Col)
+		if !ok {
+			continue
+		}
+
+		if col.Col.ColPos == pkIdxPos {
+			continue
+		}
+
+		_, ok = fn.F.Args[1].Expr.(*plan.Expr_Vec)
+		if !ok {
+			continue
+		}
+
+		_, ok = fn.F.Args[2].Expr.(*plan.Expr_Vec)
+		if !ok {
+			continue
+		}
+
+		idxPos, ok := colPos2Idx[col.Col.ColPos]
+		if !ok {
+			continue
+		}
+
+		// create index table scan
+		idxTag := builder.genNewTag()
+		idx := node.TableDef.Indexes[idxPos]
+		idxRef, idxDef := builder.compCtx.Resolve(node.ObjRef.SchemaName, idx.IndexTableName)
+
+		builder.nameByColRef[[2]int32{idxTag, 0}] = idxDef.Name + "." + idxDef.Cols[0].GetName()
+		builder.nameByColRef[[2]int32{idxTag, 1}] = idxDef.Name + "." + idxDef.Cols[1].GetName()
+
+		args := fn.F.Args
+		col.Col.RelPos = idxTag
+		col.Col.ColPos = 0
+		col.Col.Name = idxDef.Cols[0].GetName()
+
+		var idxFilter *plan.Expr
+		if idx.Unique {
+			idxFilter = expr
+		} else {
+			// secondary index
+			args[0].Typ = DeepCopyType(idxDef.Cols[0].Typ)
+			args[1], _ = BindFuncExprImplByPlanExpr(builder.GetContext(), "serial", []*plan.Expr{args[1]})
+			args[2], _ = BindFuncExprImplByPlanExpr(builder.GetContext(), "serial", []*plan.Expr{args[2]})
+			idxFilter, _ = BindFuncExprImplByPlanExpr(builder.GetContext(), "between", args)
+		}
+
+		node.FilterList = append(node.FilterList[i:], node.FilterList[i+1:]...)
+
+		idxTableScan := builder.appendNode(&plan.Node{
+			NodeType:    plan.Node_TABLE_SCAN,
+			TableDef:    idxDef,
+			ObjRef:      idxRef,
+			FilterList:  []*plan.Expr{idxFilter},
+			BindingTags: []int32{idxTag},
+			Limit:       node.Limit,
+			Offset:      node.Offset,
+		}, builder.ctxByNode[nodeId])
+
+		node.Limit = nil
+		node.Offset = nil
+
+		// create pk expr
+		pkidx := node.TableDef.Name2ColIndex[node.TableDef.Pkey.PkeyColName]
+		pkExpr := &plan.Expr{
+			Typ: DeepCopyType(node.TableDef.Cols[pkidx].Typ),
+			Expr: &plan.Expr_Col{
+				Col: &plan.ColRef{
+					RelPos: node.BindingTags[0],
+					ColPos: pkidx,
+				},
+			},
+		}
+
+		// create join cond
+		joinCond, _ := BindFuncExprImplByPlanExpr(builder.GetContext(), "=", []*plan.Expr{
+			DeepCopyExpr(pkExpr),
+			{
+				Typ:  DeepCopyType(DeepCopyType(pkExpr.Typ)),
+				Expr: &plan.Expr_Col{Col: &plan.ColRef{RelPos: idxTag, ColPos: 1}},
+			}})
+
+		// create join node
+		joinNodeId := builder.appendNode(&plan.Node{
+			NodeType:    plan.Node_JOIN,
+			JoinType:    plan.Node_INNER,
+			OnList:      []*plan.Expr{joinCond},
+			Children:    []int32{nodeId, idxTableScan},
+			BindingTags: []int32{node.BindingTags[0], idxTag},
+		}, builder.ctxByNode[nodeId])
+
+		nodeId = joinNodeId
+		break
+	}
+	return nodeId
 }
