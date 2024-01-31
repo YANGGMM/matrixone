@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/common/runtime"
+	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
 	"github.com/matrixorigin/matrixone/pkg/fileservice"
 	"github.com/matrixorigin/matrixone/pkg/logutil"
@@ -30,10 +31,13 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/common"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/db/gc"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/logtail"
+	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/tasks"
 	"os"
 	"path"
+	runtime2 "runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -72,8 +76,13 @@ func BackupData(ctx context.Context, srcFs, dstFs fileservice.FileService, dir s
 	}
 	exec := v.(executor.SQLExecutor)
 	opts := executor.Options{}
-	sql := "select mo_ctl('dn','Backup','')"
+	sql := "select mo_ctl('dn','checkpoint','')"
 	res, err := exec.Exec(ctx, sql, opts)
+	if err != nil {
+		return err
+	}
+	sql = "select mo_ctl('dn','Backup','')"
+	res, err = exec.Exec(ctx, sql, opts)
 	if err != nil {
 		return err
 	}
@@ -93,6 +102,7 @@ func BackupData(ctx context.Context, srcFs, dstFs fileservice.FileService, dir s
 }
 
 func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names []string) error {
+	copyTs := types.BuildTS(time.Now().UTC().UnixNano(), 0)
 	backupTime := names[0]
 	names = names[1:]
 	files := make(map[string]*fileservice.DirEntry, 0)
@@ -152,33 +162,60 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 
 	// record files
 	taeFileList := make([]*taeFile, 0, len(files))
-	for _, dentry := range files {
-		if dentry.IsDir {
-			panic("not support dir")
-		}
-		checksum, err := CopyFile(ctx, srcFs, dstFs, dentry, "")
+	jobScheduler := tasks.NewParallelJobScheduler(runtime2.NumCPU() * 2)
+	defer jobScheduler.Stop()
+	var wg sync.WaitGroup
+	var fileMutex sync.RWMutex
+	var retErr error
+	copyFileFn := func(ctx context.Context, srcFs, dstFs fileservice.FileService, dentry *fileservice.DirEntry, dir string) error {
+		defer wg.Done()
+		checksum, err := CopyFile(ctx, srcFs, dstFs, dentry, dir)
 		if err != nil {
 			if moerr.IsMoErrCode(err, moerr.ErrFileNotFound) &&
 				isGC(gcFileMap, dentry.Name) {
-				continue
+				return nil
 			} else {
+				retErr = err
 				return err
 			}
-
 		}
+		fileMutex.Lock()
 		taeFileList = append(taeFileList, &taeFile{
 			path:     dentry.Name,
 			size:     dentry.Size,
 			checksum: checksum,
 		})
+		fileMutex.Unlock()
+		return nil
 	}
-
-	sizeList, err := CopyDir(ctx, srcFs, dstFs, "ckp")
+	now = time.Now()
+	i := 0
+	for _, dentry := range files {
+		if dentry.IsDir {
+			panic("not support dir")
+		}
+		wg.Add(1)
+		if i == 0 {
+			// init tae dir
+			i++
+			retErr = copyFileFn(ctx, srcFs, dstFs, dentry, "")
+			if retErr != nil {
+				return retErr
+			}
+			continue
+		}
+		go copyFileFn(ctx, srcFs, dstFs, dentry, "")
+	}
+	wg.Wait()
+	if retErr != nil {
+		return retErr
+	}
+	sizeList, err := CopyDir(ctx, srcFs, dstFs, "ckp", copyTs)
 	if err != nil {
 		return err
 	}
 	taeFileList = append(taeFileList, sizeList...)
-	sizeList, err = CopyDir(ctx, srcFs, dstFs, "gc")
+	sizeList, err = CopyDir(ctx, srcFs, dstFs, "gc", copyTs)
 	if err != nil {
 		return err
 	}
@@ -194,16 +231,22 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	return nil
 }
 
-func CopyDir(ctx context.Context, srcFs, dstFs fileservice.FileService, dir string) ([]*taeFile, error) {
+func CopyDir(ctx context.Context, srcFs, dstFs fileservice.FileService, dir string, backup types.TS) ([]*taeFile, error) {
 	var checksum []byte
 	files, err := srcFs.List(ctx, dir)
 	if err != nil {
 		return nil, err
 	}
 	taeFileList := make([]*taeFile, 0, len(files))
+
 	for _, file := range files {
 		if file.IsDir {
 			panic("not support dir")
+		}
+		start, _ := blockio.DecodeCheckpointMetadataFileName(file.Name)
+		if !backup.IsEmpty() && start.GreaterEq(backup) {
+			logutil.Infof("[Backup] skip file %v", file.Name)
+			continue
 		}
 		checksum, err = CopyFile(ctx, srcFs, dstFs, &file, dir)
 		if err != nil {
