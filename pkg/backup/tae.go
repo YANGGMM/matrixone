@@ -243,8 +243,8 @@ func CopyDir(ctx context.Context, srcFs, dstFs fileservice.FileService, dir stri
 		if file.IsDir {
 			panic("not support dir")
 		}
-		start, _ := blockio.DecodeCheckpointMetadataFileName(file.Name)
-		if !backup.IsEmpty() && start.GreaterEq(backup) {
+		_, end := blockio.DecodeCheckpointMetadataFileName(file.Name)
+		if !backup.IsEmpty() && end.GreaterEq(backup) {
 			logutil.Infof("[Backup] skip file %v", file.Name)
 			continue
 		}
