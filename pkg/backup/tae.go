@@ -23,15 +23,18 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
 	"github.com/matrixorigin/matrixone/pkg/fileservice"
 	"github.com/matrixorigin/matrixone/pkg/logutil"
+	"github.com/matrixorigin/matrixone/pkg/objectio"
 	pb "github.com/matrixorigin/matrixone/pkg/pb/ctl"
 	"github.com/matrixorigin/matrixone/pkg/util/executor"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/blockio"
+	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/common"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/db/gc"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/logtail"
 	"os"
 	"path"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func getFileNames(ctx context.Context, retBytes [][][]byte) ([]string, error) {
@@ -95,6 +98,15 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	files := make(map[string]*fileservice.DirEntry, 0)
 	table := gc.NewGCTable()
 	gcFileMap := make(map[string]string)
+	var locations []objectio.Location
+	var loadDuration, copyDuration, reWriteDuration time.Duration
+	defer func() {
+		logutil.Info("backup", common.OperationField("exec backup"),
+			common.AnyField("load checkpoint cost", loadDuration),
+			common.AnyField("copy file cost", copyDuration),
+			common.AnyField("rewrite checkpoint cost", reWriteDuration))
+	}()
+	now := time.Now()
 	for _, name := range names {
 		if len(name) == 0 {
 			continue
@@ -112,26 +124,29 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 		if err != nil {
 			return err
 		}
-		locations, data, err := logtail.LoadCheckpointEntriesFromKey(ctx, srcFs, key, uint32(version))
+		loadLocations, data, err := logtail.LoadCheckpointEntriesFromKey(ctx, srcFs, key, uint32(version))
 		if err != nil {
 			return err
 		}
 		table.UpdateTable(data)
 		gcFiles := table.SoftGC()
 		mergeGCFile(gcFiles, gcFileMap)
-		for _, location := range locations {
-			if files[location.Name().String()] == nil {
-				dentry, err := srcFs.StatFile(ctx, location.Name().String())
-				if err != nil {
-					if moerr.IsMoErrCode(err, moerr.ErrFileNotFound) &&
-						isGC(gcFileMap, location.Name().String()) {
-						continue
-					} else {
-						return err
-					}
+		locations = append(locations, loadLocations...)
+	}
+	loadDuration += time.Since(now)
+	now = time.Now()
+	for _, location := range locations {
+		if files[location.Name().String()] == nil {
+			dentry, err := srcFs.StatFile(ctx, location.Name().String())
+			if err != nil {
+				if moerr.IsMoErrCode(err, moerr.ErrFileNotFound) &&
+					isGC(gcFileMap, location.Name().String()) {
+					continue
+				} else {
+					return err
 				}
-				files[location.Name().String()] = dentry
 			}
+			files[location.Name().String()] = dentry
 		}
 	}
 
@@ -168,7 +183,10 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 		return err
 	}
 	taeFileList = append(taeFileList, sizeList...)
+	copyDuration += time.Since(now)
 	//save tae files size
+	now = time.Now()
+	reWriteDuration += time.Since(now)
 	err = saveTaeFilesList(ctx, dstFs, taeFileList, backupTime)
 	if err != nil {
 		return err
