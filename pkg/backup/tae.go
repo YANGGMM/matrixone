@@ -98,7 +98,7 @@ func BackupData(ctx context.Context, srcFs, dstFs fileservice.FileService, dir s
 	if err != nil {
 		return err
 	}
-	return execBackup(ctx, srcFs, dstFs, fileName)
+	return execBackup(ctx, srcFs, dstFs, fileName, num)
 }
 
 var copyCount int
@@ -124,8 +124,8 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	if num < 32 {
 		num = 32
 	}
-	if num > 128 {
-		num = 128
+	if num > 256 {
+		num = 256
 	}
 	logutil.Info("backup", common.OperationField("start backup"),
 		common.AnyField("backup time", backupTime),
@@ -185,7 +185,7 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 
 	// record files
 	taeFileList := make([]*taeFile, 0, len(files))
-	jobScheduler := tasks.NewParallelJobScheduler(num)
+	jobScheduler := tasks.NewParallelJobScheduler(int(num))
 	defer jobScheduler.Stop()
 	var wg sync.WaitGroup
 	var fileMutex sync.RWMutex
