@@ -591,5 +591,6 @@ func init() {
 		"credentials":                CREDENTIALS,
 		"backup":                     BACKUP,
 		"filesystem":                 FILESYSTEM,
+		"parallellism":               PARALLELLISM,
 	}
 }

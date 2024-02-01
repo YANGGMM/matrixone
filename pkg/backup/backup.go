@@ -55,11 +55,16 @@ func Backup(ctx context.Context, bs *tree.BackupStart, cfg *Config) error {
 			return err
 		}
 		// for parallel backup
-		parallel, err := strconv.ParseUint(bs.Parallellism, 10, 16)
-		if err != nil {
-			return err
+		if bs.ParallelOption.Exist {
+			parallel, err := strconv.ParseUint(bs.ParallelOption.Parallellism, 10, 16)
+			if err != nil {
+				return err
+			}
+			cfg.Parallelism = uint16(parallel)
+		} else {
+			cfg.Parallelism = 0
 		}
-		cfg.Parallelism = uint16(parallel)
+
 	} else {
 		s3Conf, err = getS3Config(ctx, bs.Option)
 		if err != nil {
