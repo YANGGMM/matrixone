@@ -16,9 +16,10 @@ package tree
 
 type BackupStart struct {
 	statementImpl
-	Timestamp string
-	IsS3      bool
-	Dir       string
+	Timestamp    string
+	IsS3         bool
+	Dir          string
+	Parallellism string
 	//s3 option
 	Option []string
 }

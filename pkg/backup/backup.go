@@ -18,15 +18,17 @@ import (
 	"bytes"
 	"context"
 	"encoding/csv"
+	"os"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+
 	"github.com/google/uuid"
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/fileservice"
 	"github.com/matrixorigin/matrixone/pkg/logutil"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
-	"os"
-	"path"
-	"strings"
-	"time"
 )
 
 // Backup
@@ -41,17 +43,23 @@ func Backup(ctx context.Context, bs *tree.BackupStart, cfg *Config) error {
 		return moerr.NewInternalError(ctx, "invalid backup start")
 	}
 	// step 1 : setup fileservice
-	//1.1 setup ETL fileservice for general usage
+	// 1.1 setup ETL fileservice for general usage
 	if !bs.IsS3 {
 		cfg.GeneralDir, _, err = setupFilesystem(ctx, bs.Dir, true)
 		if err != nil {
 			return err
 		}
-		//for tae hakeeper
+		// for tae hakeeper
 		cfg.TaeDir, _, err = setupFilesystem(ctx, bs.Dir, false)
 		if err != nil {
 			return err
 		}
+		// for parallel backup
+		parallel, err := strconv.ParseUint(bs.Parallellism, 10, 16)
+		if err != nil {
+			return err
+		}
+		cfg.Parallelism = uint16(parallel)
 	} else {
 		s3Conf, err = getS3Config(ctx, bs.Option)
 		if err != nil {

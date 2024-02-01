@@ -221,6 +221,9 @@ type Config struct {
 	HAkeeper logservice.CNHAKeeperClient
 
 	Metas *Metas
+
+	// For parrallelism
+	Parallelism uint16
 }
 
 // metasGeneralFsMustBeSet denotes metas and generalFs must be ready
