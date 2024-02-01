@@ -69,7 +69,7 @@ func getFileNames(ctx context.Context, retBytes [][][]byte) ([]string, error) {
 	return fileName, err
 }
 
-func BackupData(ctx context.Context, srcFs, dstFs fileservice.FileService, dir string) error {
+func BackupData(ctx context.Context, srcFs, dstFs fileservice.FileService, dir string, num uint16) error {
 	v, ok := runtime.ProcessLevelRuntime().GetGlobalVariables(runtime.InternalSQLExecutor)
 	if !ok {
 		return moerr.NewNotSupported(ctx, "no implement sqlExecutor")
@@ -108,7 +108,7 @@ func init() {
 	copyCount = 0
 	stopPrint = false
 }
-func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names []string) error {
+func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names []string, num uint16) error {
 	copyTs := types.BuildTS(time.Now().UTC().UnixNano(), 0)
 	backupTime := names[0]
 	names = names[1:]
@@ -117,8 +117,10 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	gcFileMap := make(map[string]string)
 	var locations []objectio.Location
 	var loadDuration, copyDuration, reWriteDuration time.Duration
-	cupNum := runtime2.NumCPU()
-	num := cupNum * 5
+	cupNum := uint16(runtime2.NumCPU())
+	if num < 5 {
+		num = cupNum * 5
+	}
 	if num < 32 {
 		num = 32
 	}
