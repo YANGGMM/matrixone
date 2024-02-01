@@ -101,6 +101,13 @@ func BackupData(ctx context.Context, srcFs, dstFs fileservice.FileService, dir s
 	return execBackup(ctx, srcFs, dstFs, fileName)
 }
 
+var copyCount int
+var stopPrint bool
+
+func init() {
+	copyCount = 0
+	stopPrint = false
+}
 func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names []string) error {
 	copyTs := types.BuildTS(time.Now().UTC().UnixNano(), 0)
 	backupTime := names[0]
@@ -110,8 +117,22 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	gcFileMap := make(map[string]string)
 	var locations []objectio.Location
 	var loadDuration, copyDuration, reWriteDuration time.Duration
+	cupNum := runtime2.NumCPU()
+	num := cupNum * 10
+	if num < 50 {
+		num = 50
+	}
+	if num > 100 {
+		num = 100
+	}
+	logutil.Info("backup", common.OperationField("start backup"),
+		common.AnyField("backup time", backupTime),
+		common.AnyField("copy ts ", copyTs.ToString()),
+		common.AnyField("checkpoint num", len(names)),
+		common.AnyField("cpu num", cupNum),
+		common.AnyField("num", num))
 	defer func() {
-		logutil.Info("backup", common.OperationField("exec backup"),
+		logutil.Info("backup", common.OperationField("end backup"),
 			common.AnyField("load checkpoint cost", loadDuration),
 			common.AnyField("copy file cost", copyDuration),
 			common.AnyField("rewrite checkpoint cost", reWriteDuration))
@@ -162,11 +183,24 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 
 	// record files
 	taeFileList := make([]*taeFile, 0, len(files))
-	jobScheduler := tasks.NewParallelJobScheduler(runtime2.NumCPU() * 2)
+	jobScheduler := tasks.NewParallelJobScheduler(num)
 	defer jobScheduler.Stop()
 	var wg sync.WaitGroup
 	var fileMutex sync.RWMutex
+	var printMutex sync.Mutex
 	var retErr error
+	go func() {
+		for {
+			if stopPrint {
+				break
+			}
+			printMutex.Lock()
+			logutil.Info("backup", common.OperationField("copy file"),
+				common.AnyField("copy file num", copyCount))
+			printMutex.Unlock()
+			time.Sleep(time.Second * 5)
+		}
+	}()
 	copyFileFn := func(ctx context.Context, srcFs, dstFs fileservice.FileService, dentry *fileservice.DirEntry, dir string) error {
 		defer wg.Done()
 		checksum, err := CopyFile(ctx, srcFs, dstFs, dentry, dir)
@@ -180,6 +214,7 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 			}
 		}
 		fileMutex.Lock()
+		copyCount++
 		taeFileList = append(taeFileList, &taeFile{
 			path:     dentry.Name,
 			size:     dentry.Size,
@@ -210,6 +245,7 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	if retErr != nil {
 		return retErr
 	}
+	stopPrint = true
 	sizeList, err := CopyDir(ctx, srcFs, dstFs, "ckp", copyTs)
 	if err != nil {
 		return err
@@ -272,7 +308,6 @@ func CopyFile(ctx context.Context, srcFs, dstFs fileservice.FileService, dentry 
 		Entries:  make([]fileservice.IOEntry, 1),
 		Policy:   fileservice.SkipAllCache,
 	}
-	logutil.Infof("copy file %v", dentry)
 	ioVec.Entries[0] = fileservice.IOEntry{
 		Offset: 0,
 		Size:   dentry.Size,
