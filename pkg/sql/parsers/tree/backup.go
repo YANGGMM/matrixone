@@ -16,24 +16,12 @@ package tree
 
 type BackupStart struct {
 	statementImpl
-	Timestamp      string
-	IsS3           bool
-	Dir            string
-	ParallelOption ParallelOption
+	Timestamp   string
+	IsS3        bool
+	Dir         string
+	Parallelism string
 	//s3 option
 	Option []string
-}
-
-type ParallelOption struct {
-	Exist        bool
-	Parallellism string
-}
-
-func (node *ParallelOption) Format(ctx *FmtCtx) {
-	if node.Exist {
-		ctx.WriteString(" parallellism ")
-		ctx.WriteString(node.Parallellism)
-	}
 }
 
 func (node *BackupStart) Format(ctx *FmtCtx) {
@@ -46,7 +34,8 @@ func (node *BackupStart) Format(ctx *FmtCtx) {
 	} else {
 		ctx.WriteString("filesystem ")
 		ctx.WriteString(node.Dir)
-		node.ParallelOption.Format(ctx)
+		ctx.WriteString(" parallelism ")
+		ctx.WriteString(node.Parallelism)
 	}
 }
 

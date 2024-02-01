@@ -217,7 +217,6 @@ import (
 
     killOption tree.KillOption
     statementOption tree.StatementOption
-    parallellismOpton tree.ParallelOption
 
     tableLock tree.TableLock
     tableLocks []tree.TableLock
@@ -731,9 +730,8 @@ import (
 
 %token <str> KILL
 %type <killOption> kill_opt
-%token <str> BACKUP FILESYSTEM PARALLELLISM
+%token <str> BACKUP FILESYSTEM PARALLELISM
 %type <statementOption> statement_id_opt
-%type <parallellismOpton>parallellism_opt
 %token <str> QUERY_RESULT
 %start start_command
 
@@ -857,13 +855,13 @@ normal_stmt:
 |   backup_stmt
 
 backup_stmt:
-    BACKUP STRING FILESYSTEM STRING  parallellism_opt 
+    BACKUP STRING FILESYSTEM STRING PARALLELISM STRING 
 	{
 		$$ = &tree.BackupStart{
 		    Timestamp: $2,
 		    IsS3 : false,
 		    Dir: $4,
-            ParallelOption: $5,
+            Parallelism: $6,
 		}
 	}
     | BACKUP STRING S3OPTION '{' infile_or_s3_params '}'
@@ -873,20 +871,6 @@ backup_stmt:
         	    IsS3 : true,
         	    Option : $5,
         	}
-    }
-
-parallellism_opt:
-    {
-        $$ = tree.ParallelOption{
-            Exist: false,
-        }
-    }
-|   PARALLELLISM  STRING
-    {
-        $$ = tree.ParallelOption{
-            Exist: true,
-            Parallellism: $2,
-        }
     }
 
 kill_stmt:
@@ -10330,7 +10314,7 @@ non_reserved_keyword:
 |   STAGES
 |   BACKUP
 |   FILESYSTEM
-|   PARALLELLISM
+|   PARALLELISM
 
 func_not_keyword:
     DATE_ADD
