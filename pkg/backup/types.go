@@ -16,11 +16,12 @@ package backup
 
 import (
 	"fmt"
+	"sort"
+	"strings"
+
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/fileservice"
 	"github.com/matrixorigin/matrixone/pkg/logservice"
-	"sort"
-	"strings"
 )
 
 const (
@@ -246,6 +247,7 @@ type s3Config struct {
 	format          string
 	jsonData        string
 	isMinio         bool
+	parallelism     uint16
 }
 
 type filesystemConfig struct {

@@ -16,6 +16,7 @@ package backup
 
 import (
 	"context"
+	"strconv"
 	"strings"
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
@@ -77,7 +78,7 @@ func getS3Config(ctx context.Context, option []string) (*s3Config, error) {
 			conf.jsonData = jsondata
 			conf.format = tree.JSONLINE
 		case "is_minio":
-			isMinioData := strings.ToLower(option[i+1])
+      isMinioData := strings.ToLower(option[i+1])
 			if isMinioData != "true" && isMinioData != "false" {
 				return nil, moerr.NewBadConfig(ctx, "the is_minio '%s' is not supported", isMinioData)
 			}
@@ -86,6 +87,14 @@ func getS3Config(ctx context.Context, option []string) (*s3Config, error) {
 			} else {
 				conf.isMinio = false
 			}
+		case "parallelism":
+			parallelismData := strings.ToLower(option[i+1])
+			parall, err := strconv.ParseUint(parallelismData, 10, 16)
+			if err != nil {
+				return nil, moerr.NewBadConfig(ctx, "the parallelism '%s' is invalid", parallelismData)
+			}
+			conf.parallelism = uint16(parall)
+
 		default:
 			return nil, moerr.NewBadConfig(ctx, "the keyword '%s' is not support", strings.ToLower(option[i]))
 		}
