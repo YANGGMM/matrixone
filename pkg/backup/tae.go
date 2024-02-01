@@ -101,13 +101,6 @@ func BackupData(ctx context.Context, srcFs, dstFs fileservice.FileService, dir s
 	return execBackup(ctx, srcFs, dstFs, fileName, num)
 }
 
-var copyCount int
-var stopPrint bool
-
-func init() {
-	copyCount = 0
-	stopPrint = false
-}
 func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names []string, num uint16) error {
 	copyTs := types.BuildTS(time.Now().UTC().UnixNano(), 0)
 	backupTime := names[0]
@@ -115,6 +108,8 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	files := make(map[string]*fileservice.DirEntry, 0)
 	table := gc.NewGCTable()
 	gcFileMap := make(map[string]string)
+	stopPrint := false
+	copyCount := 0
 	var locations []objectio.Location
 	var loadDuration, copyDuration, reWriteDuration time.Duration
 	cupNum := uint16(runtime2.NumCPU())
