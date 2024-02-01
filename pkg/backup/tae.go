@@ -118,12 +118,12 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	var locations []objectio.Location
 	var loadDuration, copyDuration, reWriteDuration time.Duration
 	cupNum := runtime2.NumCPU()
-	num := cupNum * 10
-	if num < 50 {
-		num = 50
+	num := cupNum * 5
+	if num < 32 {
+		num = 32
 	}
-	if num > 100 {
-		num = 100
+	if num > 128 {
+		num = 128
 	}
 	logutil.Info("backup", common.OperationField("start backup"),
 		common.AnyField("backup time", backupTime),
@@ -191,13 +191,14 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	var retErr error
 	go func() {
 		for {
+			printMutex.Lock()
 			if stopPrint {
+				printMutex.Unlock()
 				break
 			}
-			printMutex.Lock()
+			printMutex.Unlock()
 			logutil.Info("backup", common.OperationField("copy file"),
 				common.AnyField("copy file num", copyCount))
-			printMutex.Unlock()
 			time.Sleep(time.Second * 5)
 		}
 	}()
@@ -245,7 +246,9 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 	if retErr != nil {
 		return retErr
 	}
+	printMutex.Lock()
 	stopPrint = true
+	printMutex.Unlock()
 	sizeList, err := CopyDir(ctx, srcFs, dstFs, "ckp", copyTs)
 	if err != nil {
 		return err
