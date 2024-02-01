@@ -198,7 +198,8 @@ func execBackup(ctx context.Context, srcFs, dstFs fileservice.FileService, names
 			}
 			printMutex.Unlock()
 			logutil.Info("backup", common.OperationField("copy file"),
-				common.AnyField("copy file num", copyCount))
+				common.AnyField("copy file num", copyCount),
+				common.AnyField("total file num", len(files)))
 			time.Sleep(time.Second * 5)
 		}
 	}()
