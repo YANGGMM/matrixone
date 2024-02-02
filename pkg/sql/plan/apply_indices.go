@@ -54,7 +54,7 @@ func (builder *QueryBuilder) applyIndicesForFilters(nodeID int32, node *plan.Nod
 
 	indexes := node.TableDef.Indexes
 	sort.Slice(indexes, func(i, j int) bool {
-		return indexes[i].Unique && !indexes[j].Unique
+		return indexes[i].Unique && !indexes[j].Unique || (indexes[i].Unique == indexes[j].Unique && len(indexes[i].Parts) > len(indexes[j].Parts))
 	})
 
 	// Apply unique/secondary indices if only indexed column is referenced
@@ -284,9 +284,41 @@ END0:
 			}
 		}
 
-		if len(filterIdx) < numParts && !usePartialIndex {
+		if len(filterIdx) < numParts && (idxDef.Unique || !usePartialIndex) {
 			continue
 		}
+
+		// if unique index col is null, the will not created index col for the content
+		// so the length of  filterIdx must equeal to numParts
+
+		// select * from t where a = 2;
+		// before
+		// 		mysql> explain select * from t where i = 42;
+		// +------------------------------------------------------------------------------------------------------------------------------+
+		// | QUERY PLAN                                                                                                                   |
+		// +------------------------------------------------------------------------------------------------------------------------------+
+		// | Project                                                                                                                      |
+		// |   ->  Join                                                                                                                   |
+		// |         Join Type: SEMI                                                                                                      |
+		// |         Join Cond: (t.__mo_fake_pk_col = __mo_index_unique_018d67c1-7b13-72c5-b4ce-820622eb6ed9.__mo_index_pri_col)          |
+		// |         ->  Table Scan on abc.t                                                                                              |
+		// |               Block Filter Cond: (t.i = 42)                                                                                  |
+		// |         ->  Table Scan on abc.__mo_index_unique_018d67c1-7b13-72c5-b4ce-820622eb6ed9                                         |
+		// |               Filter Cond: prefix_eq(__mo_index_unique_018d67c1-7b13-72c5-b4ce-820622eb6ed9.__mo_index_idx_col, ':*')       |
+		// |               Block Filter Cond: prefix_eq(__mo_index_unique_018d67c1-7b13-72c5-b4ce-820622eb6ed9.__mo_index_idx_col, ':*') |
+		// +------------------------------------------------------------------------------------------------------------------------------+
+
+		// after
+		// 		mysql> explain analyze select * from t where i = 42;
+		// +---------------------------------------------------------------------------------------------------------------------------------------------+
+		// | QUERY PLAN                                                                                                                                  |
+		// +---------------------------------------------------------------------------------------------------------------------------------------------+
+		// | Project                                                                                                                                     |
+		// |   Analyze: timeConsumed=0ms waitTime=12ms inputRows=64 outputRows=64 InputSize=768bytes OutputSize=768bytes MemorySize=768bytes             |
+		// |   ->  Table Scan on abc.t                                                                                                                   |
+		// |         Analyze: timeConsumed=11ms waitTime=0ms inputRows=6400 outputRows=64 InputSize=76800bytes OutputSize=768bytes MemorySize=83968bytes |
+		// |         Filter Cond: (t.i = 42)                                                                                                             |
+		// +---------------------------------------------------------------------------------------------------------------------------------------------+
 
 		idxTag := builder.genNewTag()
 		idxObjRef, idxTableDef := builder.compCtx.Resolve(node.ObjRef.SchemaName, idxDef.IndexTableName)
