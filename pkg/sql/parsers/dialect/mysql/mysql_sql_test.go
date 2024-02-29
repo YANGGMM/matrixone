@@ -2395,6 +2395,10 @@ var (
 			output: "drop snapshot snapshot1",
 		},
 		{
+			input:  "SHOW SNAPSHOTS WHERE sname = 'snapshot1'",
+			output: "show snapshots where sname = snapshot1",
+		},
+		{
 			input:  "DROP STAGE my_ext_stage1",
 			output: "drop stage my_ext_stage1",
 		},
