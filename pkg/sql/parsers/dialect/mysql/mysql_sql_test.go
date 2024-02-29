@@ -2391,6 +2391,10 @@ var (
 			output: "create snapshot snapshot1 for account acc1",
 		},
 		{
+			input:  "DROP SNAPSHOT snapshot1",
+			output: "drop snapshot snapshot1",
+		},
+		{
 			input:  "DROP STAGE my_ext_stage1",
 			output: "drop stage my_ext_stage1",
 		},

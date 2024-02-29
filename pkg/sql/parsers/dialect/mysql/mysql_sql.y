@@ -521,7 +521,7 @@ import (
 %type <statement> loop_stmt iterate_stmt leave_stmt repeat_stmt while_stmt
 %type <statement> create_publication_stmt drop_publication_stmt alter_publication_stmt show_publications_stmt show_subscriptions_stmt
 %type <statement> create_stage_stmt drop_stage_stmt alter_stage_stmt
-%type <statement> create_snapshot_stmt
+%type <statement> create_snapshot_stmt drop_snapshot_stmt
 %type <str> urlparams
 %type <str> comment_opt view_list_opt view_opt security_opt view_tail check_type
 %type <subscriptionOption> subcription_opt
@@ -3916,6 +3916,7 @@ drop_ddl_stmt:
 |   drop_procedure_stmt
 |   drop_stage_stmt
 |   drop_connector_stmt
+|   drop_snapshot_stmt
 
 drop_sequence_stmt:
     DROP SEQUENCE exists_opt table_name_list
@@ -6083,7 +6084,7 @@ alter_publication_accounts_opt:
 
 
 drop_publication_stmt:
-DROP PUBLICATION exists_opt ident
+    DROP PUBLICATION exists_opt ident
     {
         var ifExists = $3
         var name = tree.Identifier($4.Compare())
@@ -6091,11 +6092,19 @@ DROP PUBLICATION exists_opt ident
     }
 
 drop_stage_stmt:
-DROP STAGE exists_opt ident
+    DROP STAGE exists_opt ident
     {
         var ifNotExists = $3
         var name = tree.Identifier($4.Compare())
         $$ = tree.NewDropStage(ifNotExists, name)
+    }
+
+drop_snapshot_stmt:
+   DROP SNAPSHOT exists_opt ident
+   {
+        var ifExists = $3
+        var name = tree.Identifier($4.Compare())
+        $$ = tree.NewDropSnapShot(ifExists, name)
     }
 
 account_role_name:
