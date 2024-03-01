@@ -115,6 +115,9 @@ const (
 
 	// MO_PUBS publication meta table
 	MO_PUBS = "mo_pubs"
+
+	// MO_SNAPSHOTS
+	MO_SNAPSHOTS = "mo_snapshots"
 )
 
 const (
