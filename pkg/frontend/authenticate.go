@@ -9605,12 +9605,14 @@ func doCreateSnapshot(ctx context.Context, ses *Session, stmt *tree.CreateSnapSh
 		}
 
 		// check account exists or not
-		accuntExist, err := checkTenantExistsOrNot(ctx, bh, snapshotForAccount)
-		if err != nil {
-			return err
-		}
-		if !accuntExist {
-			return moerr.NewInternalError(ctx, "create snapshot for account %s, account %s does not exist", snapshotForAccount, snapshotForAccount)
+		if currentAccount == sysAccountName {
+			accuntExist, err := checkTenantExistsOrNot(ctx, bh, snapshotForAccount)
+			if err != nil {
+				return err
+			}
+			if !accuntExist {
+				return moerr.NewInternalError(ctx, "create snapshot for account %s, account %s does not exist", snapshotForAccount, snapshotForAccount)
+			}
 		}
 	}
 
