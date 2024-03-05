@@ -619,5 +619,6 @@ func init() {
 		"percent":                    PERCENT,
 		"master":                     MASTER,
 		"parallelism":                PARALLELISM,
+		"tag":                        TAG,
 	}
 }

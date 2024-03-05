@@ -17,6 +17,7 @@ package tree
 type TableName struct {
 	TableExpr
 	objName
+	AtTsCluase *AtTimeStampClause
 }
 
 func (tn TableName) Format(ctx *FmtCtx) {
@@ -29,6 +30,11 @@ func (tn TableName) Format(ctx *FmtCtx) {
 		ctx.WriteByte('.')
 	}
 	ctx.WriteString(string(tn.ObjectName))
+
+	if tn.AtTsCluase != nil {
+		ctx.WriteByte(' ')
+		tn.AtTsCluase.Format(ctx)
+	}
 }
 
 func (tn *TableName) Name() Identifier {
@@ -57,11 +63,37 @@ func (node *TableNames) Format(ctx *FmtCtx) {
 	}
 }
 
-func NewTableName(name Identifier, prefix ObjectNamePrefix) *TableName {
+func NewTableName(name Identifier, prefix ObjectNamePrefix, atTs *AtTimeStampClause) *TableName {
 	return &TableName{
 		objName: objName{
 			ObjectName:       name,
 			ObjectNamePrefix: prefix,
 		},
+		AtTsCluase: atTs,
 	}
+}
+
+type AtTimeStampClause struct {
+	TimeStampExpr *TimeStampExpr
+	SnapshotName  Identifier
+}
+
+func (node *AtTimeStampClause) Format(ctx *FmtCtx) {
+	ctx.WriteString("AT ")
+	if node.TimeStampExpr != nil {
+		node.TimeStampExpr.Format(ctx)
+	}
+	if node.SnapshotName != "" {
+		ctx.WriteString(" SNAPSHOT ")
+		node.SnapshotName.Format(ctx)
+	}
+}
+
+type TimeStampExpr struct {
+	Expr Expr
+}
+
+func (node *TimeStampExpr) Format(ctx *FmtCtx) {
+	ctx.WriteString("TIMESTAMP ")
+	node.Expr.Format(ctx)
 }

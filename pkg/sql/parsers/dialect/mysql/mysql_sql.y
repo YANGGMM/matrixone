@@ -253,6 +253,8 @@ import (
     timeSliding *tree.Sliding
     timeFill *tree.Fill
     fillMode tree.FillMode
+
+    atTsClause *tree.AtTimeStampClause
 }
 
 %token LEX_ERROR
@@ -400,6 +402,7 @@ import (
 %token <str> REPLACE CONVERT
 %token <str> SEPARATOR TIMESTAMPDIFF
 %token <str> CURRENT_DATE CURRENT_USER CURRENT_ROLE
+%token <str> TAG
 
 // Time unit
 %token <str> SECOND_MICROSECOND MINUTE_MICROSECOND MINUTE_SECOND HOUR_MICROSECOND
@@ -780,6 +783,8 @@ import (
 %type <timeSliding> sliding_opt
 %type <timeFill> fill_opt
 %type <fillMode> fill_mode
+
+%type <atTsClause> at_ts_clause at_ts_clause_opt
 
 %start start_command
 
@@ -4079,12 +4084,12 @@ table_name_opt_wild:
     ident wild_opt
     {
         prefix := tree.ObjectNamePrefix{ExplicitSchema: false}
-        $$ = tree.NewTableName(tree.Identifier($1.Compare()), prefix)
+        $$ = tree.NewTableName(tree.Identifier($1.Compare()), prefix, nil)
     }
 |    ident '.' ident wild_opt
     {
         prefix := tree.ObjectNamePrefix{SchemaName: tree.Identifier($1.Compare()), ExplicitSchema: true}
-        $$ = tree.NewTableName(tree.Identifier($3.Compare()), prefix)
+        $$ = tree.NewTableName(tree.Identifier($3.Compare()), prefix, nil)
     }
 
 wild_opt:
@@ -5067,7 +5072,7 @@ select_expression:
 from_opt:
     {
         prefix := tree.ObjectNamePrefix{ExplicitSchema: false}
-        tn := tree.NewTableName(tree.Identifier(""), prefix)
+        tn := tree.NewTableName(tree.Identifier(""), prefix, nil)
         $$ = &tree.From{
             Tables: tree.TableExprs{&tree.AliasedTableExpr{Expr: tn}},
         }
@@ -7561,15 +7566,42 @@ table_name_list:
 // <table>
 // <schema>.<table>
 table_name:
-    ident
+    ident at_ts_clause_opt
     {
         prefix := tree.ObjectNamePrefix{ExplicitSchema: false}
-        $$ = tree.NewTableName(tree.Identifier($1.Compare()), prefix)
+        atTs := $2
+        $$ = tree.NewTableName(tree.Identifier($1.Compare()), prefix, atTs)
     }
-|   ident '.' ident
+|   ident '.' ident at_ts_clause_opt
     {
         prefix := tree.ObjectNamePrefix{SchemaName: tree.Identifier($1.Compare()), ExplicitSchema: true}
-        $$ = tree.NewTableName(tree.Identifier($3.Compare()), prefix)
+        atTs := $4
+        $$ = tree.NewTableName(tree.Identifier($3.Compare()), prefix, atTs)
+    }
+
+at_ts_clause_opt:
+    {
+        $$ = nil
+    }
+|   at_ts_clause
+    {
+        $$ = $1
+    }
+
+at_ts_clause:
+    '@' '(' TIMESTAMP '=' expression ')'
+    {
+        $$ = &tree.AtTimeStampClause{
+            TimeStampExpr : &tree.TimeStampExpr{
+                Expr: $5,
+            },
+        }
+    }
+|   '@' '(' TAG '=' ident ')'
+    {
+        $$ = &tree.AtTimeStampClause{
+            SnapshotName : tree.Identifier($5.Compare()),
+        }
     }
 
 table_elem_list_opt:
@@ -9431,6 +9463,7 @@ name_confict:
 |   WEEK
 |   YEAR
 |   UUID
+|   TAG
 
 interval_expr:
     INTERVAL expression time_unit

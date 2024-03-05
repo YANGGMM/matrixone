@@ -1950,6 +1950,14 @@ var (
 			output: "select count(a) over (partition by col1, col2 order by col3 desc range unbounded preceding) from t1",
 		},
 		{
+			input:  "select * from t1@(timestamp = '2021-01-01 00:00:00')",
+			output: "",
+		},
+		{
+			input:  "select * from t1@(tag = 'snapshot_1')",
+			output: "",
+		},
+		{
 			input: "alter account if exists abc",
 		},
 		{
