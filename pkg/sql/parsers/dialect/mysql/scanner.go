@@ -103,6 +103,9 @@ func (s *Scanner) Scan() (int, string) {
 			tID, tBytes = s.scanLiteralIdentifier()
 		} else if s.cur() == eofChar {
 			return LEX_ERROR, ""
+		} else if s.cur() == '(' {
+			s.inc()
+			return s.Scan()
 		} else {
 			tID, tBytes = s.scanIdentifier(true)
 		}

@@ -402,7 +402,7 @@ import (
 %token <str> REPLACE CONVERT
 %token <str> SEPARATOR TIMESTAMPDIFF
 %token <str> CURRENT_DATE CURRENT_USER CURRENT_ROLE
-%token <str> TAG
+%token <str> TAG  AT  SYSTEM OF
 
 // Time unit
 %token <str> SECOND_MICROSECOND MINUTE_MICROSECOND MINUTE_SECOND HOUR_MICROSECOND
@@ -7589,7 +7589,7 @@ at_ts_clause_opt:
     }
 
 at_ts_clause:
-    '@' '(' TIMESTAMP '=' expression ')'
+    AT_ID '(' TIMESTAMP '=' expression ')'
     {
         $$ = &tree.AtTimeStampClause{
             TimeStampExpr : &tree.TimeStampExpr{
@@ -7597,7 +7597,7 @@ at_ts_clause:
             },
         }
     }
-|   '@' '(' TAG '=' ident ')'
+|   AT_ID '(' TAG  '=' ident ')' 
     {
         $$ = &tree.AtTimeStampClause{
             SnapshotName : tree.Identifier($5.Compare()),
