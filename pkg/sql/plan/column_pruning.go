@@ -38,6 +38,19 @@ func (builder *QueryBuilder) markSinkProject(nodeID int32, step int32, colRefBoo
 	}
 }
 
+func (builder *QueryBuilder) PruneUnneededColumns(nodeID int32, step int32) error {
+
+	rootNode := builder.qry.Nodes[nodeID]
+	resultTag := rootNode.BindingTags[0]
+	colRefCnt := make(map[[2]int32]int)
+	for i := range rootNode.ProjectList {
+		colRefCnt[[2]int32{resultTag, int32(i)}] = 1
+	}
+	sinkColUsed := builder.sinkColUsed
+
+	return builder.pruneUnneededColumns(nodeID, step, colRefCnt, sinkColUsed)
+}
+
 func (builder *QueryBuilder) pruneUnneededColumns(nodeID int32, step int32, colRefCnt map[[2]int32]int, sinkColUsed map[[2]int32]bool) error {
 	node := builder.qry.Nodes[nodeID]
 

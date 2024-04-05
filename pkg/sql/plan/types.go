@@ -175,6 +175,12 @@ type QueryBuilder struct {
 
 	deleteNode map[uint64]int32 //delete node in this query. key is tableId, value is the nodeId of sinkScan node in the delete plan
 	skipStats  bool
+
+	sinkColUsed map[[2]int32]bool
+}
+
+func (b *QueryBuilder) GetQuery() *plan.Query {
+	return b.qry
 }
 
 type CTERef struct {
