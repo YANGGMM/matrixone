@@ -395,15 +395,15 @@ func handleShowTableStatus(ses *Session, execCtx *ExecCtx, stmt *tree.ShowTableS
 		if err != nil {
 			return err
 		}
-		if row[3], err = r.Rows(ctx); err != nil {
+		if row[4], err = r.Rows(ctx); err != nil {
 			return err
 		}
-		if row[5], err = r.Size(ctx, disttae.AllColumns); err != nil {
+		if row[6], err = r.Size(ctx, disttae.AllColumns); err != nil {
 			return err
 		}
-		roleId := row[17].(uint32)
+		roleId := row[18].(uint32)
 		// role name
-		if row[18], err = getRoleName(roleId); err != nil {
+		if row[19], err = getRoleName(roleId); err != nil {
 			return err
 		}
 		mrs.AddRow(row)

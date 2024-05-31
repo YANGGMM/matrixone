@@ -638,7 +638,8 @@ func buildShowTableStatus(stmt *tree.ShowTableStatus, ctx CompilerContext) (*Pla
 	accountClause := fmt.Sprintf("account_id = %v or (account_id = 0 and (%s))", accountId, mustShowTable)
 	sql := `select
 				relname as 'Name',
-				'Tae' as 'Engine',
+				'InnoDB' as 'Engine',
+				10 as 'Version',
 				'Dynamic' as 'Row_format',
 				0 as 'Rows',
 				0 as 'Avg_row_length',
@@ -650,7 +651,7 @@ func buildShowTableStatus(stmt *tree.ShowTableStatus, ctx CompilerContext) (*Pla
 				created_time as 'Create_time',
 				'NULL' as 'Update_time',
 				'NULL' as 'Check_time',
-				'utf-8' as 'Collation',
+				'utf8mb4_0900_ai_ci' as 'Collation',
 				'NULL' as 'Checksum',
 				'' as 'Create_options',
 				rel_comment as 'Comment',

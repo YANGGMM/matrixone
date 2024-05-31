@@ -3589,6 +3589,14 @@ var gSysVarsDefs = map[string]SystemVariable{
 		Type:              InitSystemVariableBoolType("experimental_master_index"),
 		Default:           int64(0),
 	},
+	"innodb_default_row_format": {
+		Name:              "innodb_default_row_format",
+		Scope:             ScopeGlobal,
+		Dynamic:           true,
+		SetVarHintApplies: false,
+		Type:              InitSystemSystemEnumType("innodb_default_row_format", "dynamic", "compact", "redundant"),
+		Default:           "dynamic",
+	},
 }
 
 func updateTimeZone(ctx context.Context, sess *Session, vars map[string]interface{}, name string, val interface{}) error {
