@@ -397,7 +397,7 @@ func doRestoreSnapshot(ctx context.Context, ses *Session, stmt *tree.RestoreSnap
 
 	// restore cluster
 	if stmt.Level == tree.RESTORELEVELCLUSTER {
-		if err = restoreToCluster(ctx, ses, bh, snapshotName, snapshot.ts); err != nil {
+		if err = restoreToCluster(ctx, ses, bh, snapshot, snapshotName, snapshot.ts); err != nil {
 			return
 		}
 		return
@@ -813,7 +813,7 @@ func recreateTable(
 		}
 		getLogger().Info(fmt.Sprintf("[%s] insert select table: %v, cost: %v", snapshotName, tblInfo.tblName, time.Since(beginTime)))
 	} else {
-		insertIntoSql := fmt.Sprintf(restoreTableDataByTsFmt, tblInfo.dbName, tblInfo.tblName, tblInfo.dbName, tblInfo.tblName, snapshotTs)
+		insertIntoSql := fmt.Sprintf(restoreTableDataByNameFmt, tblInfo.dbName, tblInfo.tblName, tblInfo.dbName, tblInfo.tblName, snapshotTs)
 		beginTime := time.Now()
 		getLogger().Info(fmt.Sprintf("[%s] start to insert select table: %v, insert sql: %s", snapshotName, tblInfo.tblName, insertIntoSql))
 		if err = bh.ExecRestore(ctx, insertIntoSql, curAccountId, toAccountId); err != nil {
@@ -1347,7 +1347,7 @@ func checkAndRestorePublicationRecord(
 	return
 }
 
-func restoreToCluster(ctx context.Context, ses *Session, bh BackgroundExec, snapshotName string, snapshotTs int64) (err error) {
+func restoreToCluster(ctx context.Context, ses *Session, bh BackgroundExec, snapshot *snapshotRecord, snapshotName string, snapshotTs int64) (err error) {
 	getLogger().Info(fmt.Sprintf("[%s] start to restore cluster, restore timestamp: %d", snapshotName, snapshotTs))
 
 	// drop accounts
@@ -1370,8 +1370,19 @@ func restoreToCluster(ctx context.Context, ses *Session, bh BackgroundExec, snap
 			return
 		}
 
+		var toAccountId uint64
 		getLogger().Info(fmt.Sprintf("[%s] cluster restore start to restore account: %v, account id: %d", snapshotName, account.accountName, account.accountId))
-		toAccountId := account.accountId
+		{
+			toAccountId = account.accountId
+			sp, err := mockInsertSnapshotRecord(ctx, bh, snapshot, toAccountId, account.accountName)
+			if err != nil {
+				return err
+			}
+			snapshotName = sp
+			defer func() {
+				err = mockDeleteSnapshotRecord(ctx, bh, snapshot, sp)
+			}()
+		}
 
 		// pre restore account
 		// drop foreign key related tables first
@@ -1489,6 +1500,43 @@ func getDropAccounts(ctx context.Context, bh BackgroundExec, snapshotName string
 		if err = bh.Exec(ctx, fmt.Sprintf(dropAccountFmt, account)); err != nil {
 			return
 		}
+	}
+	return
+}
+
+func mockInsertSnapshotRecord(ctx context.Context, bh BackgroundExec, snapshot *snapshotRecord, toAccountId uint64, accountName string) (snapshotName string, err error) {
+	// mock snapshot id and snapshot name
+	snapshotUId, err := uuid.NewV7()
+	if err != nil {
+		return
+	}
+	snapshotId := snapshotUId.String()
+
+	snapshotName = snapshotId + "_" + snapshot.snapshotName + "_mock"
+	sql, err := getSqlForCreateSnapshot(ctx,
+		snapshotId,
+		snapshotName,
+		snapshot.ts,
+		tree.SNAPSHOTLEVELACCOUNT.String(),
+		accountName,
+		"",
+		"",
+		toAccountId)
+	if err != nil {
+		return
+	}
+	getLogger().Info(fmt.Sprintf("[%s] mock insert snapshot record sql: %s", snapshot.snapshotName, sql))
+	if err = bh.Exec(ctx, sql); err != nil {
+		return
+	}
+	return
+}
+
+func mockDeleteSnapshotRecord(ctx context.Context, bh BackgroundExec, snapshot *snapshotRecord, snapshotName string) (err error) {
+	sql := getSqlForDropSnapshot(snapshotName)
+	getLogger().Info(fmt.Sprintf("[%s] mock delete snapshot record sql: %s", snapshot.snapshotName, sql))
+	if err = bh.Exec(ctx, sql); err != nil {
+		return
 	}
 	return
 }
