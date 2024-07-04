@@ -437,6 +437,26 @@ var supportedAggInNewFramework = []FuncNew{
 		},
 	},
 
+	{
+		functionId: ESTIMATE_K,
+		class:      plan.Function_AGG,
+		layout:     STANDARD_FUNCTION,
+		checkFn: func(overloads []overload, inputs []types.Type) checkResult {
+			return fixedUnaryAggTypeCheck(inputs, aggexec.MedianSupportedType)
+		},
+		Overloads: []overload{
+			{
+				overloadId: 0,
+				isAgg:      true,
+				retType:    aggexec.MedianReturnType,
+				aggFramework: aggregationLogicOfOverload{
+					str:         "estimate_k",
+					aggRegister: agg.RegisterEstimateK,
+				},
+			},
+		},
+	},
+
 	// function `BITMAP_CONSTRUCT_AGG`
 	{
 		functionId: BITMAP_CONSTRUCT_AGG,

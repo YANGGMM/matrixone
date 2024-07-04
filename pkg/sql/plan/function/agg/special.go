@@ -39,3 +39,7 @@ func RegisterMedian(id int64) {
 func RegisterClusterCenters(id int64) {
 	aggexec.RegisterClusterCenters(id)
 }
+
+func RegisterEstimateK(id int64) {
+	aggexec.RegisterEstimateK(id)
+}

@@ -16,6 +16,7 @@ package aggexec
 
 import (
 	"fmt"
+
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 )
@@ -54,6 +55,11 @@ func RegisterMedian(id int64) {
 func RegisterClusterCenters(id int64) {
 	specialAgg[id] = true
 	aggIdOfClusterCenters = id
+}
+
+func RegisterEstimateK(id int64) {
+	specialAgg[id] = true
+	aggIdOfEstimateK = id
 }
 
 func RegisterRowNumberWin(id int64) {
@@ -111,6 +117,7 @@ var (
 	winIdOfRowNumber      = int64(-7)
 	winIdOfRank           = int64(-8)
 	winIdOfDenseRank      = int64(-9)
+	aggIdOfEstimateK      = int64(-10)
 	groupConcatSep        = ","
 	getCroupConcatRet     = func(args ...types.Type) types.Type {
 		for _, p := range args {
