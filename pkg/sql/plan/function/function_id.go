@@ -362,6 +362,7 @@ const (
 	COSINE_DISTANCE //COSINE_DISTANCE
 	CLUSTER_CENTERS // CLUSTER_CENTERS
 	SUB_VECTOR      // SUB_VECTOR
+	ESTIMATE_K
 
 	PYTHON_UDF
 
@@ -671,6 +672,7 @@ var functionIdRegister = map[string]int32{
 	"l2_distance":       L2_DISTANCE,
 	"l2_distance_sq":    L2_DISTANCE_SQ,
 	"cosine_distance":   COSINE_DISTANCE,
+	"estimate_k":        ESTIMATE_K,
 
 	"python_user_defined_function": PYTHON_UDF,
 

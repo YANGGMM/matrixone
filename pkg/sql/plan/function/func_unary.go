@@ -1568,3 +1568,13 @@ func LastDay(
 	}
 	return nil
 }
+
+func EstimateK(
+	ivecs []*vector.Vector,
+	result vector.FunctionResultWrapper,
+	_ *process.Process,
+	length int,
+	selectList *FunctionSelectList,
+) error {
+
+}

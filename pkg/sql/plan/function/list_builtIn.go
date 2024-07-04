@@ -1821,6 +1821,36 @@ var supportedArrayOperations = []FuncNew{
 		},
 	},
 
+	// function `estimate_k`
+	{
+		functionId: ESTIMATE_K,
+		class:      plan.Function_STRICT,
+		layout:     STANDARD_FUNCTION,
+		checkFn:    fixedTypeMatch,
+		Overloads: []overload{
+			{
+				overloadId: 0,
+				args:       []types.T{types.T_array_float32},
+				retType: func(parameters []types.Type) types.Type {
+					return types.T_int64.ToType()
+				},
+				newOp: func() executeLogicOfOverload {
+					return L1NormArray[float32]
+				},
+			},
+			{
+				overloadId: 1,
+				args:       []types.T{types.T_array_float64},
+				retType: func(parameters []types.Type) types.Type {
+					return types.T_int64.ToType()
+				},
+				newOp: func() executeLogicOfOverload {
+					return L1NormArray[float64]
+				},
+			},
+		},
+	},
+
 	// function `l2_norm`
 	{
 		functionId: L2_NORM,
