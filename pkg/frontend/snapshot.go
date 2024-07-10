@@ -62,7 +62,7 @@ var (
 
 	checkSnapshotTsFormat = `select snapshot_id from mo_catalog.mo_snapshots where ts = %d order by snapshot_id;`
 
-	restoreTableDataByTsFmt = "insert into `%s`.`%s` SELECT * FROM `%s`.`%s` {MO_TS = %d }"
+	restoreTableDataByTsFmt = "insert into `%s`.`%s` SELECT * FROM `%s`.`%s`"
 
 	restoreTableDataByNameFmt = "insert into `%s`.`%s` SELECT * FROM `%s`.`%s` {SNAPSHOT = '%s'}"
 
@@ -816,48 +816,60 @@ func recreateTable(
 	tblInfo *tableInfo,
 	toAccountId uint32,
 	snapshotTs int64) (err error) {
-	getLogger().Info(fmt.Sprintf("[%s] start to restore table: %v, restore timestamp: %d", snapshotName, tblInfo.tblName, snapshotTs))
-	curAccountId, err := defines.GetAccountId(ctx)
-	if err != nil {
+	// getLogger().Info(fmt.Sprintf("[%s] start to restore table: %v, restore timestamp: %d", snapshotName, tblInfo.tblName, snapshotTs))
+	// curAccountId, err := defines.GetAccountId(ctx)
+	// if err != nil {
+	// 	return
+	// }
+
+	// ctx = defines.AttachAccountId(ctx, toAccountId)
+
+	// if err = bh.Exec(ctx, fmt.Sprintf("use `%s`", tblInfo.dbName)); err != nil {
+	// 	return
+	// }
+
+	insertIntoSql := fmt.Sprintf(restoreTableDataByTsFmt, "big_data_test", "table_basic_for_load_100m_new", "big_data_test", "table_basic_for_load_100m")
+	beginTime := time.Now()
+	getLogger().Info(fmt.Sprintf("[%s] start to insert select table: %v, insert sql: %s", snapshotName, "table_basic_for_load_100m_new", insertIntoSql))
+	if err = bh.Exec(ctx, insertIntoSql); err != nil {
 		return
 	}
+	getLogger().Info(fmt.Sprintf("[%s] insert select table: %v, cost: %v", snapshotName, "table_basic_for_load_100m_new", time.Since(beginTime)))
 
-	ctx = defines.AttachAccountId(ctx, toAccountId)
+	return nil
 
-	if err = bh.Exec(ctx, fmt.Sprintf("use `%s`", tblInfo.dbName)); err != nil {
-		return
-	}
-
-	getLogger().Info(fmt.Sprintf("[%s] start to drop table: %v,", snapshotName, tblInfo.tblName))
-	if err = bh.Exec(ctx, fmt.Sprintf("drop table if exists %s", tblInfo.tblName)); err != nil {
-		return
-	}
+	// getLogger().Info(fmt.Sprintf("[%s] start to drop table: %v,", snapshotName, tblInfo.tblName))
+	// if err = bh.Exec(ctx, fmt.Sprintf("drop table if exists %s", tblInfo.tblName)); err != nil {
+	// 	return
+	// }
 
 	// create table
-	getLogger().Info(fmt.Sprintf("[%s] start to create table: %v, create table sql: %s", snapshotName, tblInfo.tblName, tblInfo.createSql))
-	if err = bh.Exec(ctx, tblInfo.createSql); err != nil {
-		return
-	}
+	// newTbl := tblInfo.tblName + "_new"
+	// tblInfo.createSql = strings.Replace(tblInfo.createSql, tblInfo.tblName, newTbl, 1)
+	// getLogger().Info(fmt.Sprintf("[%s] start to create table: %v, create table sql: %s", snapshotName, tblInfo.tblName, tblInfo.createSql))
+	// if err = bh.Exec(ctx, tblInfo.createSql); err != nil {
+	// 	return
+	// }
 
-	if curAccountId == toAccountId {
-		// insert data
-		insertIntoSql := fmt.Sprintf(restoreTableDataByTsFmt, tblInfo.dbName, tblInfo.tblName, tblInfo.dbName, tblInfo.tblName, snapshotTs)
-		beginTime := time.Now()
-		getLogger().Info(fmt.Sprintf("[%s] start to insert select table: %v, insert sql: %s", snapshotName, tblInfo.tblName, insertIntoSql))
-		if err = bh.Exec(ctx, insertIntoSql); err != nil {
-			return
-		}
-		getLogger().Info(fmt.Sprintf("[%s] insert select table: %v, cost: %v", snapshotName, tblInfo.tblName, time.Since(beginTime)))
-	} else {
-		insertIntoSql := fmt.Sprintf(restoreTableDataByNameFmt, tblInfo.dbName, tblInfo.tblName, tblInfo.dbName, tblInfo.tblName, snapshotName)
-		beginTime := time.Now()
-		getLogger().Info(fmt.Sprintf("[%s] start to insert select table: %v, insert sql: %s", snapshotName, tblInfo.tblName, insertIntoSql))
-		if err = bh.ExecRestore(ctx, insertIntoSql, curAccountId, toAccountId); err != nil {
-			return
-		}
-		getLogger().Info(fmt.Sprintf("[%s] insert select table: %v, cost: %v", snapshotName, tblInfo.tblName, time.Since(beginTime)))
-	}
-	return
+	// if curAccountId == toAccountId {
+	// 	// insert data
+	// 	insertIntoSql := fmt.Sprintf(restoreTableDataByTsFmt, tblInfo.dbName, newTbl, tblInfo.dbName, tblInfo.tblName)
+	// 	beginTime := time.Now()
+	// 	getLogger().Info(fmt.Sprintf("[%s] start to insert select table: %v, insert sql: %s", snapshotName, newTbl, insertIntoSql))
+	// 	if err = bh.Exec(ctx, insertIntoSql); err != nil {
+	// 		return
+	// 	}
+	// 	getLogger().Info(fmt.Sprintf("[%s] insert select table: %v, cost: %v", snapshotName, tblInfo.tblName, time.Since(beginTime)))
+	// } else {
+	// 	insertIntoSql := fmt.Sprintf(restoreTableDataByNameFmt, tblInfo.dbName, tblInfo.tblName, tblInfo.dbName, tblInfo.tblName, snapshotName)
+	// 	beginTime := time.Now()
+	// 	getLogger().Info(fmt.Sprintf("[%s] start to insert select table: %v, insert sql: %s", snapshotName, tblInfo.tblName, insertIntoSql))
+	// 	if err = bh.ExecRestore(ctx, insertIntoSql, curAccountId, toAccountId); err != nil {
+	// 		return
+	// 	}
+	// 	getLogger().Info(fmt.Sprintf("[%s] insert select table: %v, cost: %v", snapshotName, tblInfo.tblName, time.Since(beginTime)))
+	// }
+	// return
 }
 
 func needSkipDb(dbName string) bool {
