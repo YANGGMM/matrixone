@@ -4158,6 +4158,15 @@ func strToUuid(
 	return nil
 }
 
+func ConvertJsonBytes(inBytes []byte) ([]byte, error) {
+	s := convertByteSliceToString(inBytes)
+	json, err := types.ParseStringToByteJson(s)
+	if err != nil {
+		return nil, err
+	}
+	return types.EncodeJson(json)
+}
+
 func ConvertJsonString(in string) ([]byte, error) {
 	json := bytejson.CreateByteJSON(in)
 	return types.EncodeJson(json)
