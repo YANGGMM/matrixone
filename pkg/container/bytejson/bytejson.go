@@ -16,6 +16,7 @@ package bytejson
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -562,6 +563,74 @@ func (bj ByteJson) unnest(out []UnnestResult, path *Path, outer, recursive bool,
 
 	}
 	return out, nil
+}
+
+func (bj ByteJson) GetElemDepth() int {
+	switch bj.Type {
+	case TpCodeArray:
+		elemCount := bj.GetElemCount()
+		maxDepth := 0
+		for i := 0; i < elemCount; i++ {
+			obj := bj.objectGetVal(i)
+			depth := obj.GetElemDepth()
+			if depth > maxDepth {
+				maxDepth = depth
+			}
+		}
+		return maxDepth + 1
+	case TpCodeObject:
+		elemCount := bj.GetElemCount()
+		maxDepth := 0
+		for i := 0; i < elemCount; i++ {
+			obj := bj.ArrayGetElem(i)
+			depth := obj.GetElemDepth()
+			if depth > maxDepth {
+				maxDepth = depth
+			}
+		}
+		return maxDepth + 1
+	default:
+		return 1
+	}
+}
+
+// GetElemCount gets the count of Object or Array.
+func (bj ByteJson) GetElemCount() int {
+	return int(jsonEndian.Uint32(bj.Data))
+}
+
+// ArrayGetElem gets the element of the index `idx`.
+func (bj ByteJson) ArrayGetElem(idx int) ByteJson {
+	return bj.valEntryGet(headerSize + idx*valEntrySize)
+}
+
+// objectGetVal gets the value of the key `i`.
+func (bj ByteJson) objectGetVal(i int) ByteJson {
+	elemCount := bj.GetElemCount()
+	return bj.valEntryGet(headerSize + elemCount*keyEntrySize + i*valEntrySize)
+}
+
+// valEntryGet gets the value of the valEntry by the offset `valEntryOff`.
+func (bj ByteJson) valEntryGet(valEntryOff int) ByteJson {
+	tpCode := bj.Data[valEntryOff]
+	valOff := jsonEndian.Uint32(bj.Data[valEntryOff+valTypeSize:])
+	switch tpCode {
+	case TpCodeLiteral:
+		return ByteJson{Type: TpCodeLiteral, Data: bj.Data[valEntryOff+valTypeSize : valEntryOff+valTypeSize+1]}
+	case TpCodeUint64, TpCodeInt64, TpCodeFloat64:
+		return ByteJson{Type: tpCode, Data: bj.Data[valOff : valOff+8]}
+	case TpCodeString:
+		strLen, lenLen := binary.Uvarint(bj.Data[valOff:])
+		totalLen := uint32(lenLen) + uint32(strLen)
+		return ByteJson{Type: tpCode, Data: bj.Data[valOff : valOff+totalLen]}
+	case TpCodeOpaque:
+		strLen, lenLen := binary.Uvarint(bj.Data[valOff+1:])
+		totalLen := 1 + uint32(lenLen) + uint32(strLen)
+		return ByteJson{Type: tpCode, Data: bj.Data[valOff : valOff+totalLen]}
+
+	}
+	dataSize := jsonEndian.Uint32(bj.Data[valOff+dataSizeOff:])
+	return ByteJson{Type: tpCode, Data: bj.Data[valOff : valOff+dataSize]}
 }
 
 // Unnest returns a slice of UnnestResult, each UnnestResult contains filtered data, if param filters is nil, return all fields.

@@ -18,13 +18,12 @@ import (
 	"cmp"
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"math"
-	"reflect"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/pingcap/errors"
 )
 
@@ -103,6 +102,8 @@ const (
 	TpCodeTimeStmap  TpCode = 0x10
 	TpCodeDuring     TpCode = 0x11
 )
+
+const maxJSONDepth = 100
 
 // var jsonSafeSet = [utf8.RuneSelf]bool{
 // 	' ':      true,
@@ -254,10 +255,10 @@ func CreateByteJsonWithCheck(in any) (ByteJson, error) {
 	if err != nil {
 		return ByteJson{}, err
 	}
-	bj := ByteJson{TypeCode: typeCode, Value: buf}
+	bj := ByteJson{Type: typeCode, Data: buf}
 	// GetElemDepth always returns +1.
 	if bj.GetElemDepth()-1 > maxJSONDepth {
-		return ByteJson{}, ErrJSONDocumentTooDeep
+		return ByteJson{}, moerr.NewInvalidInputNoCtx("json too deep")
 	}
 	return bj, nil
 }
@@ -308,24 +309,6 @@ func appendByteJSON(buf []byte, in any) (TpCode, []byte, error) {
 		if err != nil {
 			return typeCode, nil, errors.Trace(err)
 		}
-	case Opaque:
-		typeCode = JSONTypeCodeOpaque
-		buf = appendBinaryOpaque(buf, x)
-	case Time:
-		typeCode = JSONTypeCodeDate
-		if x.Type() == mysql.TypeDatetime {
-			typeCode = JSONTypeCodeDatetime
-		} else if x.Type() == mysql.TypeTimestamp {
-			typeCode = JSONTypeCodeTimestamp
-		}
-		buf = appendBinaryUint64(buf, uint64(x.CoreTime()))
-	case Duration:
-		typeCode = JSONTypeCodeDuration
-		buf = appendBinaryUint64(buf, uint64(x.Duration))
-		buf = appendBinaryUint32(buf, uint32(x.Fsp))
-	default:
-		msg := fmt.Sprintf(unknownTypeErrorMsg, reflect.TypeOf(in))
-		err = errors.New(msg)
 	}
 	return typeCode, buf, err
 }
@@ -431,6 +414,11 @@ func appendBinaryArray(buf []byte, array []any) ([]byte, error) {
 	return buf, nil
 }
 
+type field struct {
+	key string
+	val any
+}
+
 func appendBinaryObject(buf []byte, x map[string]any) ([]byte, error) {
 	docOff := len(buf)
 	buf = appendUint32(buf, uint32(len(x)))
@@ -452,7 +440,7 @@ func appendBinaryObject(buf []byte, x map[string]any) ([]byte, error) {
 		keyOff := len(buf) - docOff
 		keyLen := uint32(len(field.key))
 		if keyLen > math.MaxUint16 {
-			return nil, nil
+			return nil, moerr.NewInvalidInputNoCtx("key too long")
 		}
 		jsonEndian.PutUint32(buf[keyEntryOff:], uint32(keyOff))
 		jsonEndian.PutUint16(buf[keyEntryOff+keyLenOff:], uint16(keyLen))
