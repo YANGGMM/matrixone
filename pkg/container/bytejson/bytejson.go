@@ -568,7 +568,7 @@ func (bj ByteJson) unnest(out []UnnestResult, path *Path, outer, recursive bool,
 func (bj ByteJson) GetElemDepth() int {
 	switch bj.Type {
 	case TpCodeArray:
-		elemCount := bj.GetElemCount()
+		elemCount := bj.GetElemCnt()
 		maxDepth := 0
 		for i := 0; i < elemCount; i++ {
 			obj := bj.objectGetVal(i)
@@ -579,7 +579,7 @@ func (bj ByteJson) GetElemDepth() int {
 		}
 		return maxDepth + 1
 	case TpCodeObject:
-		elemCount := bj.GetElemCount()
+		elemCount := bj.GetElemCnt()
 		maxDepth := 0
 		for i := 0; i < elemCount; i++ {
 			obj := bj.ArrayGetElem(i)
@@ -594,11 +594,6 @@ func (bj ByteJson) GetElemDepth() int {
 	}
 }
 
-// GetElemCount gets the count of Object or Array.
-func (bj ByteJson) GetElemCount() int {
-	return int(jsonEndian.Uint32(bj.Data))
-}
-
 // ArrayGetElem gets the element of the index `idx`.
 func (bj ByteJson) ArrayGetElem(idx int) ByteJson {
 	return bj.valEntryGet(headerSize + idx*valEntrySize)
@@ -606,7 +601,7 @@ func (bj ByteJson) ArrayGetElem(idx int) ByteJson {
 
 // objectGetVal gets the value of the key `i`.
 func (bj ByteJson) objectGetVal(i int) ByteJson {
-	elemCount := bj.GetElemCount()
+	elemCount := bj.GetElemCnt()
 	return bj.valEntryGet(headerSize + elemCount*keyEntrySize + i*valEntrySize)
 }
 
