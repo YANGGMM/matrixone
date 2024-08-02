@@ -28,6 +28,7 @@ import (
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/common/util"
+	"github.com/matrixorigin/matrixone/pkg/container/bytejson"
 	"github.com/matrixorigin/matrixone/pkg/container/nulls"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
@@ -4166,6 +4167,11 @@ func ConvertJsonBytes(inBytes []byte) ([]byte, error) {
 	return types.EncodeJson(json)
 }
 
+func ConvertJsonString(in string) ([]byte, error) {
+	json := bytejson.CreateByteJSON(in)
+	return types.EncodeJson(json)
+}
+
 func strToJson(
 	from vector.FunctionParameterWrapper[types.Varlena],
 	to *vector.FunctionResult[types.Varlena], length int, selectList *FunctionSelectList) error {
@@ -4178,7 +4184,8 @@ func strToJson(
 				return err
 			}
 		} else {
-			val, err := ConvertJsonBytes(v)
+			jsonStr := convertByteSliceToString(v)
+			val, err := ConvertJsonString(jsonStr)
 			if err != nil {
 				return err
 			}
