@@ -114,7 +114,7 @@ func (bj ByteJson) IsNull() bool {
 }
 
 func (bj ByteJson) GetElemCnt() int {
-	return int(endian.Uint32(bj.Data))
+	return int(jsonEndian.Uint32(bj.Data))
 }
 
 func (bj ByteJson) GetInt64() int64 {
@@ -122,7 +122,7 @@ func (bj ByteJson) GetInt64() int64 {
 }
 
 func (bj ByteJson) GetUint64() uint64 {
-	return endian.Uint64(bj.Data)
+	return jsonEndian.Uint64(bj.Data)
 }
 
 func (bj ByteJson) GetFloat64() float64 {
@@ -242,8 +242,8 @@ func (bj ByteJson) toString(buf []byte) ([]byte, error) {
 }
 
 func (bj ByteJson) getObjectKey(i int) []byte {
-	keyOff := int(endian.Uint32(bj.Data[headerSize+i*keyEntrySize:]))
-	keyLen := int(endian.Uint16(bj.Data[headerSize+i*keyEntrySize+keyOriginOff:]))
+	keyOff := int(jsonEndian.Uint32(bj.Data[headerSize+i*keyEntrySize:]))
+	keyLen := int(jsonEndian.Uint16(bj.Data[headerSize+i*keyEntrySize+keyLenOff:]))
 	return bj.Data[keyOff : keyOff+keyLen]
 }
 
@@ -258,7 +258,7 @@ func (bj ByteJson) getObjectVal(i int) ByteJson {
 
 func (bj ByteJson) getValEntry(off int) ByteJson {
 	tpCode := bj.Data[off]
-	valOff := endian.Uint32(bj.Data[off+valTypeSize:])
+	valOff := jsonEndian.Uint32(bj.Data[off+valTypeSize:])
 	switch TpCode(tpCode) {
 	case TpCodeLiteral:
 		return ByteJson{Type: TpCodeLiteral, Data: bj.Data[off+valTypeSize : off+valTypeSize+1]}
@@ -269,7 +269,7 @@ func (bj ByteJson) getValEntry(off int) ByteJson {
 		totalLen := uint32(num) + uint32(length)
 		return ByteJson{Type: TpCode(tpCode), Data: bj.Data[valOff : valOff+totalLen]}
 	}
-	dataBytes := endian.Uint32(bj.Data[valOff+docSizeOff:])
+	dataBytes := jsonEndian.Uint32(bj.Data[valOff+dataSizeOff:])
 	return ByteJson{Type: TpCode(tpCode), Data: bj.Data[valOff : valOff+dataBytes]}
 }
 
@@ -890,8 +890,8 @@ func (w *byteJsonWriter) writeNode(root bool, node Node) (TpCode, uint32, error)
 				w.buf = append(w.buf, byte(TpCodeObject))
 				baseOffset += valTypeSize
 			}
-			w.buf = endian.AppendUint32(w.buf, uint32(n))
-			w.buf = endian.AppendUint32(w.buf, 0) // object buf length
+			w.buf = jsonEndian.AppendUint32(w.buf, uint32(n))
+			w.buf = jsonEndian.AppendUint32(w.buf, 0) // object buf length
 
 			w.buf = extendByte(w.buf, n*(keyEntrySize+valEntrySize))
 
@@ -902,8 +902,8 @@ func (w *byteJsonWriter) writeNode(root bool, node Node) (TpCode, uint32, error)
 				if length > math.MaxUint16 {
 					return 0, 0, moerr.NewInvalidInputNoCtx("json key %s", k)
 				}
-				endian.PutUint32(w.buf[o:], loc)
-				endian.PutUint16(w.buf[o+keyOriginOff:], uint16(length))
+				jsonEndian.PutUint32(w.buf[o:], loc)
+				jsonEndian.PutUint16(w.buf[o+keyLenOff:], uint16(length))
 				loc += length
 				w.buf = append(w.buf, k...)
 			}
@@ -916,14 +916,14 @@ func (w *byteJsonWriter) writeNode(root bool, node Node) (TpCode, uint32, error)
 				o := baseOffset + headerSize + n*keyEntrySize + i*valEntrySize
 				w.buf[o] = byte(tp)
 				if tp == TpCodeLiteral {
-					endian.PutUint32(w.buf[o+valTypeSize:], length)
+					jsonEndian.PutUint32(w.buf[o+valTypeSize:], length)
 					continue
 				}
-				endian.PutUint32(w.buf[o+valTypeSize:], loc)
+				jsonEndian.PutUint32(w.buf[o+valTypeSize:], loc)
 				loc += length
 			}
 
-			endian.PutUint32(w.buf[baseOffset+4:], loc) // object buf length
+			jsonEndian.PutUint32(w.buf[baseOffset+4:], loc) // object buf length
 			return TpCodeObject, uint32(len(w.buf) - start), nil
 		}
 
@@ -934,8 +934,8 @@ func (w *byteJsonWriter) writeNode(root bool, node Node) (TpCode, uint32, error)
 			w.buf = append(w.buf, byte(TpCodeArray))
 			baseOffset++
 		}
-		w.buf = endian.AppendUint32(w.buf, uint32(n))
-		w.buf = endian.AppendUint32(w.buf, 0) // array buf length
+		w.buf = jsonEndian.AppendUint32(w.buf, uint32(n))
+		w.buf = jsonEndian.AppendUint32(w.buf, 0) // array buf length
 		w.buf = extendByte(w.buf, n*5)
 
 		loc := uint32(headerSize + n*valEntrySize)
@@ -947,14 +947,14 @@ func (w *byteJsonWriter) writeNode(root bool, node Node) (TpCode, uint32, error)
 			o := baseOffset + headerSize + i*valEntrySize
 			w.buf[o] = byte(tp)
 			if tp == TpCodeLiteral {
-				endian.PutUint32(w.buf[o+valTypeSize:], length)
+				jsonEndian.PutUint32(w.buf[o+valTypeSize:], length)
 				continue
 			}
-			endian.PutUint32(w.buf[o+valTypeSize:], loc)
+			jsonEndian.PutUint32(w.buf[o+valTypeSize:], loc)
 			loc += length
 		}
 
-		endian.PutUint32(w.buf[baseOffset+4:], loc) // array buf length
+		jsonEndian.PutUint32(w.buf[baseOffset+4:], loc) // array buf length
 		return TpCodeArray, uint32(len(w.buf) - start), nil
 	case bool:
 		lit := LiteralFalse
@@ -1002,22 +1002,22 @@ func (w *byteJsonWriter) parseNumber(in json.Number) (TpCode, []byte, error) {
 		if err = checkFloat64(val); err != nil {
 			return TpCodeFloat64, nil, err
 		}
-		endian.PutUint64(data[:], math.Float64bits(val))
+		jsonEndian.PutUint64(data[:], math.Float64bits(val))
 		return TpCodeFloat64, data[:], nil
 	}
 	if val, err := in.Int64(); err == nil { //check if it is an int
-		endian.PutUint64(data[:], uint64(val))
+		jsonEndian.PutUint64(data[:], uint64(val))
 		return TpCodeInt64, data[:], nil
 	}
 	if val, err := strconv.ParseUint(string(in), 10, 64); err == nil { //check if it is a uint
-		endian.PutUint64(data[:], val)
+		jsonEndian.PutUint64(data[:], val)
 		return TpCodeUint64, data[:], nil
 	}
 	if val, err := in.Float64(); err == nil { //check if it is a float
 		if err = checkFloat64(val); err != nil {
 			return TpCodeFloat64, nil, err
 		}
-		endian.PutUint64(data[:], math.Float64bits(val))
+		jsonEndian.PutUint64(data[:], math.Float64bits(val))
 		return TpCodeFloat64, data[:], nil
 	}
 	var tpCode TpCode
