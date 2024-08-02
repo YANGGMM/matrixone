@@ -28,6 +28,7 @@ import (
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/common/util"
+	"github.com/matrixorigin/matrixone/pkg/container/bytejson"
 	"github.com/matrixorigin/matrixone/pkg/container/nulls"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
@@ -4157,12 +4158,8 @@ func strToUuid(
 	return nil
 }
 
-func ConvertJsonBytes(inBytes []byte) ([]byte, error) {
-	s := convertByteSliceToString(inBytes)
-	json, err := types.ParseStringToByteJson(s)
-	if err != nil {
-		return nil, err
-	}
+func ConvertJsonString(in string) ([]byte, error) {
+	json := bytejson.CreateByteJSON(in)
 	return types.EncodeJson(json)
 }
 
@@ -4178,7 +4175,8 @@ func strToJson(
 				return err
 			}
 		} else {
-			val, err := ConvertJsonBytes(v)
+			jsonStr := convertByteSliceToString(v)
+			val, err := ConvertJsonString(jsonStr)
 			if err != nil {
 				return err
 			}

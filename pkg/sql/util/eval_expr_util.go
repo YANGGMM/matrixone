@@ -221,7 +221,7 @@ func SetBytesToAnyVector(ctx context.Context, val string, row int,
 		}
 		return vector.SetBytesAt(vec, row, v, proc.Mp())
 	case types.T_json:
-		val, err := function.ConvertJsonBytes([]byte(val))
+		val, err := function.ConvertJsonString(val)
 		if err != nil {
 			return err
 		}
