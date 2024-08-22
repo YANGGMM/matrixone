@@ -1,0 +1,33 @@
+CREATE DATABASE exampledb;
+USE exampledb;
+CREATE TABLE example_table (
+id INT AUTO_INCREMENT PRIMARY KEY,
+created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+data VARCHAR(255) NOT NULL
+);
+INSERT INTO example_table (data) VALUES ('Record 1'),('Record 2'),('Record 3'),('Record 4'),('Record 5'),('Record 6'),('Record 7'),('Record 8'),('Record 9'),('Record 10');
+SELECT * FROM example_table LIMIT 10;
+id    created_at    data
+1    2024-08-22 14:51:27    Record 1
+2    2024-08-22 14:51:27    Record 2
+3    2024-08-22 14:51:27    Record 3
+4    2024-08-22 14:51:27    Record 4
+5    2024-08-22 14:51:27    Record 5
+6    2024-08-22 14:51:27    Record 6
+7    2024-08-22 14:51:27    Record 7
+8    2024-08-22 14:51:27    Record 8
+9    2024-08-22 14:51:27    Record 9
+10    2024-08-22 14:51:27    Record 10
+SELECT id, now() FROM example_table LIMIT 10;
+id    now()
+1    2024-08-22 14:51:27.773282000
+2    2024-08-22 14:51:27.773282000
+3    2024-08-22 14:51:27.773282000
+4    2024-08-22 14:51:27.773282000
+5    2024-08-22 14:51:27.773282000
+6    2024-08-22 14:51:27.773282000
+7    2024-08-22 14:51:27.773283000
+8    2024-08-22 14:51:27.773283000
+9    2024-08-22 14:51:27.773283000
+10    2024-08-22 14:51:27.773283000
+drop database exampledb;
