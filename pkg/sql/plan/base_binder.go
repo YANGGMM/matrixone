@@ -1605,12 +1605,12 @@ func BindFuncExprImplByPlanExpr(ctx context.Context, name string, args []*Expr) 
 		if len(args) != 2 {
 			return nil, moerr.NewInvalidArg(ctx, name+" function have invalid input args length", len(args))
 		}
-		return resetJsonExtractFunc(ctx, args[0], args[1], false)
+		return resetJsonExtractFunc(ctx, args[0], args[1], true)
 	case "json_extract_float64":
 		if len(args) != 2 {
 			return nil, moerr.NewInvalidArg(ctx, name+" function have invalid input args length", len(args))
 		}
-		return resetJsonExtractFunc(ctx, args[0], args[1], true)
+		return resetJsonExtractFunc(ctx, args[0], args[1], false)
 	}
 
 	// get args(exprs) & types
@@ -2109,6 +2109,12 @@ func resetJsonExtractFunc(
 					Func: getFunctionObjRef(fGet.GetEncodedOverloadID(), "cast"),
 					Args: []*Expr{
 						jsonUnquoteExpr,
+						{
+							Typ: toType,
+							Expr: &plan.Expr_T{
+								T: &plan.TargetType{},
+							},
+						},
 					},
 				},
 			},
