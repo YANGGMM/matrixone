@@ -1601,6 +1601,16 @@ func BindFuncExprImplByPlanExpr(ctx context.Context, name string, args []*Expr) 
 		if len(args) != 2 {
 			return nil, moerr.NewInvalidArg(ctx, name+" function have invalid input args length", len(args))
 		}
+	case "json_extract_string":
+		if len(args) != 2 {
+			return nil, moerr.NewInvalidArg(ctx, name+" function have invalid input args length", len(args))
+		}
+		return resetJsonExtractFunc(ctx, args[0], args[1], false)
+	case "json_extract_float64":
+		if len(args) != 2 {
+			return nil, moerr.NewInvalidArg(ctx, name+" function have invalid input args length", len(args))
+		}
+		return resetJsonExtractFunc(ctx, args[0], args[1], true)
 	}
 
 	// get args(exprs) & types
@@ -2033,4 +2043,54 @@ func resetDateFunction(ctx context.Context, dateExpr *Expr, intervalExpr *Expr) 
 		Expr: expr,
 	}
 	return resetDateFunctionArgs(ctx, dateExpr, listExpr)
+}
+
+// resetJsonExtractFunc reset json_extract_string/json_extract_float64 function
+// build json_extract_string as
+// json_extract_string(json, path) -> json_unquote(json_extract(json, path))
+// build json_extract_float64 as
+// json_extract_float64(json, path) -> cast(json_unquote(json_extract(json, path)) as float64)
+func resetJsonExtractFunc(
+	ctx context.Context,
+	jsonExpr *Expr,
+	pathExpr *Expr,
+	isString bool,
+) (*Expr, error) {
+	jsonExtractExpr, err := BindFuncExprImplByPlanExpr(ctx, "json_extract", []*plan.Expr{jsonExpr, pathExpr})
+	if err != nil {
+		return nil, err
+	}
+
+	jsonUnquoteExpr, err := BindFuncExprImplByPlanExpr(ctx, "json_unquote", []*plan.Expr{jsonExtractExpr})
+	if err != nil {
+		return nil, err
+	}
+
+	if isString {
+		return jsonUnquoteExpr, nil
+	} else {
+		toType := plan.Type{
+			Id: int32(types.T_float64),
+		}
+		toType.NotNullable = jsonUnquoteExpr.Typ.NotNullable
+		argsType := []types.Type{
+			makeTypeByPlan2Expr(jsonUnquoteExpr),
+			makeTypeByPlan2Type(toType),
+		}
+		fGet, err := function.GetFunctionByName(ctx, "cast", argsType)
+		if err != nil {
+			return nil, err
+		}
+		return &Expr{
+			Expr: &plan.Expr_F{
+				F: &plan.Function{
+					Func: getFunctionObjRef(fGet.GetEncodedOverloadID(), "cast"),
+					Args: []*Expr{
+						jsonUnquoteExpr,
+					},
+				},
+			},
+			Typ: toType,
+		}, nil
+	}
 }
