@@ -505,3 +505,32 @@ insert into t3 values(-1000);
 select maxvalue from t1;
 SQL parser error: You have an error in your SQL syntax; check the manual that corresponds to your MatrixOne server version for the right syntax to use. syntax error at line 1 column 15 near " maxvalue from t1;";
 drop table t3;
+drop table if exists t1;
+create table t1 (a bigint unsigned);
+insert into t1 values (0xFFFFFFFFFFFFFFFD);
+insert into t1 values (0xFFFFFFFFFFFFFFFE);
+select * from t1;
+a
+18446744073709551613
+18446744073709551614
+select * from t1 where a -1 > 1;
+a
+18446744073709551613
+18446744073709551614
+select * from t1 where a > 1;
+a
+18446744073709551613
+18446744073709551614
+select * from t1 where a + 1 > 1;
+a
+18446744073709551613
+18446744073709551614
+select a + 1 from t1;
+a + 1
+18446744073709551614
+18446744073709551615
+select a - 1 from t1;
+a - 1
+18446744073709551612
+18446744073709551613
+drop table t1;
