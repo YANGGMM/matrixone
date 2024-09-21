@@ -76,6 +76,7 @@ const defaultSaltReadTimeout = time.Millisecond * 200
 const charsetBinary = 0x3f
 const charsetVarchar = 0x21
 const boolColumnLength = 12
+const boolColumnBinaryLength = 1
 
 func init() {
 	serverVersion.Store("1.3.0")
@@ -2115,11 +2116,11 @@ func (mp *MysqlProtocolImpl) makeColumnDefinition41Payload(column *MysqlColumn, 
 
 	if column.ColumnType() == defines.MYSQL_TYPE_BOOL {
 		//int<2>              character set
-		pos = mp.io.WriteUint16(data, pos, charsetVarchar)
+		pos = mp.io.WriteUint16(data, pos, charsetBinary)
 		//int<4>              column length
-		pos = mp.io.WriteUint32(data, pos, boolColumnLength)
+		pos = mp.io.WriteUint32(data, pos, boolColumnBinaryLength)
 		//int<1>              type
-		pos = mp.io.WriteUint8(data, pos, uint8(defines.MYSQL_TYPE_VARCHAR))
+		pos = mp.io.WriteUint8(data, pos, uint8(defines.MYSQL_TYPE_TINY))
 	} else {
 		//int<2>              character set
 		pos = mp.io.WriteUint16(data, pos, column.Charset())

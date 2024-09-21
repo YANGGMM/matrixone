@@ -58,7 +58,12 @@ func extractRowFromVector(ctx context.Context, ses FeSession, vec *vector.Vector
 	case types.T_json:
 		row[i] = types.DecodeJson(copyBytes(vec.GetBytesAt(rowIndex), true))
 	case types.T_bool:
-		row[i] = vector.GetFixedAtNoTypeCheck[bool](vec, rowIndex)
+		bVal := vector.GetFixedAtNoTypeCheck[bool](vec, rowIndex)
+		if bVal {
+			row[i] = 1
+		} else {
+			row[i] = 0
+		}
 	case types.T_bit:
 		row[i] = vector.GetFixedAtNoTypeCheck[uint64](vec, rowIndex)
 	case types.T_int8:

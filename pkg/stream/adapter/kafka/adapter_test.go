@@ -390,7 +390,12 @@ func getNonNullValue(col *vector.Vector, row uint32) any {
 
 	switch col.GetType().Oid {
 	case types.T_bool:
-		return vector.GetFixedAtWithTypeCheck[bool](col, int(row))
+		bVal := vector.GetFixedAtWithTypeCheck[bool](col, int(row))
+		if bVal {
+			return 1
+		} else {
+			return 0
+		}
 	case types.T_int8:
 		return vector.GetFixedAtWithTypeCheck[int8](col, int(row))
 	case types.T_int16:
