@@ -139,21 +139,16 @@ type connManager struct {
 	// It is mainly used in CN server draining.
 	cnTunnels cnTunnels
 
-	// Map from connection ID to CN server.
+	// Map from connection ID to CN server. It is used for testing.
 	connIDServers map[uint32]*CNServer
-
-	// proxyToBackendConnID maps proxy connection ID to
-	// backend connection ID.
-	proxyToBackendConnID map[uint32]uint32
 }
 
 // newConnManager creates a new connManager.
 func newConnManager() *connManager {
 	m := &connManager{
-		conns:                make(map[LabelHash]*connInfo),
-		connIDServers:        make(map[uint32]*CNServer),
-		proxyToBackendConnID: make(map[uint32]uint32),
-		cnTunnels:            make(cnTunnels),
+		conns:         make(map[LabelHash]*connInfo),
+		cnTunnels:     make(cnTunnels),
+		connIDServers: make(map[uint32]*CNServer),
 	}
 	return m
 }
@@ -197,8 +192,7 @@ func (m *connManager) connect(cn *CNServer, t *tunnel) {
 		m.conns[cn.hash] = newConnInfo(cn.reqLabel)
 	}
 	m.conns[cn.hash].cnTunnels.add(cn.uuid, t)
-	m.connIDServers[cn.backendConnID] = cn
-	m.proxyToBackendConnID[cn.proxyConnID] = cn.backendConnID
+	m.connIDServers[cn.connID] = cn
 
 	if _, ok := m.cnTunnels[cn.uuid]; !ok {
 		m.cnTunnels[cn.uuid] = make(tunnelSet)
@@ -214,9 +208,8 @@ func (m *connManager) disconnect(cn *CNServer, t *tunnel) {
 	if ok {
 		ci.cnTunnels.del(cn.uuid, t)
 	}
-	delete(m.connIDServers, cn.backendConnID)
-	delete(m.proxyToBackendConnID, cn.proxyConnID)
 	delete(m.cnTunnels[cn.uuid], t)
+	delete(m.connIDServers, cn.connID)
 }
 
 // count returns the total connection count.
@@ -265,24 +258,6 @@ func (m *connManager) getLabelInfo(hash LabelHash) labelInfo {
 	return ci.label
 }
 
-// getCNServerByConnID returns a CN server which has the connection ID.
-func (m *connManager) getCNServerByConnID(connID uint32) *CNServer {
-	m.Lock()
-	defer m.Unlock()
-	// The proxy connection ID and backend connection ID are global unique.
-	// So we should check if the connID from parameter is proxy connection ID
-	// or backend connection ID.
-	backendConnID, ok := m.proxyToBackendConnID[connID]
-	if ok {
-		connID = backendConnID
-	}
-	cn, ok := m.connIDServers[connID]
-	if ok {
-		return cn
-	}
-	return nil
-}
-
 func (m *connManager) getTunnelsByCNID(id string) []*tunnel {
 	m.Lock()
 	defer m.Unlock()
@@ -295,4 +270,14 @@ func (m *connManager) getTunnelsByCNID(id string) []*tunnel {
 		tuns = append(tuns, tun)
 	}
 	return tuns
+}
+
+func (m *connManager) GetCNServerByConnID(connID uint32) (*CNServer, error) {
+	m.Lock()
+	defer m.Unlock()
+	cn, ok := m.connIDServers[connID]
+	if !ok {
+		return nil, nil
+	}
+	return cn, nil
 }

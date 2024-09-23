@@ -15,9 +15,12 @@
 package compile
 
 import (
-	"github.com/matrixorigin/matrixone/pkg/vm/process"
-	"sync"
 	"sync/atomic"
+
+	"github.com/matrixorigin/matrixone/pkg/vm/message"
+
+	"github.com/matrixorigin/matrixone/pkg/pb/plan"
+	"github.com/matrixorigin/matrixone/pkg/vm/process"
 
 	"github.com/matrixorigin/matrixone/pkg/perfcounter"
 
@@ -29,16 +32,16 @@ func init() {
 		func() *Compile {
 			return &Compile{
 				affectRows:   &atomic.Uint64{},
-				lock:         &sync.RWMutex{},
 				counterSet:   &perfcounter.CounterSet{},
 				nodeRegs:     make(map[[2]int32]*process.WaitRegister),
 				stepRegs:     make(map[int32][][2]int32),
 				metaTables:   make(map[string]struct{}),
-				MessageBoard: process.NewMessageBoard(),
+				lockTables:   make(map[uint64]*plan.LockTarget),
+				MessageBoard: message.NewMessageBoard(),
 			}
 		},
 		func(c *Compile) {
-			c.reset()
+			c.clear()
 		},
 		reuse.DefaultOptions[Compile]().
 			WithEnableChecker(),
@@ -53,12 +56,12 @@ func init() {
 			WithEnableChecker(),
 	)
 
-	reuse.CreatePool[anaylze](
-		func() *anaylze {
-			return &anaylze{}
+	reuse.CreatePool[AnalyzeModule](
+		func() *AnalyzeModule {
+			return &AnalyzeModule{}
 		},
-		func(a *anaylze) { *a = anaylze{} },
-		reuse.DefaultOptions[anaylze]().
+		func(a *AnalyzeModule) { *a = AnalyzeModule{} },
+		reuse.DefaultOptions[AnalyzeModule]().
 			WithEnableChecker(),
 	)
 
@@ -66,7 +69,7 @@ func init() {
 		func() *fuzzyCheck {
 			return &fuzzyCheck{}
 		},
-		func(f *fuzzyCheck) { f.reset() },
+		func(f *fuzzyCheck) { f.clear() },
 		reuse.DefaultOptions[fuzzyCheck]().
 			WithEnableChecker(),
 	)

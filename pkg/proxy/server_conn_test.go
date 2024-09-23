@@ -51,24 +51,26 @@ func testMakeCNServer(
 		addr = "unix://" + addr
 	}
 	return &CNServer{
-		backendConnID: connID,
-		addr:          addr,
-		uuid:          uuid,
-		salt:          testSlat,
-		hash:          hash,
-		reqLabel:      reqLabel,
+		connID:   connID,
+		addr:     addr,
+		uuid:     uuid,
+		salt:     testSlat,
+		hash:     hash,
+		reqLabel: reqLabel,
 	}
 }
 
 type mockServerConn struct {
-	conn net.Conn
+	conn       net.Conn
+	createTime time.Time
 }
 
 var _ ServerConn = (*mockServerConn)(nil)
 
 func newMockServerConn(conn net.Conn) *mockServerConn {
 	m := &mockServerConn{
-		conn: conn,
+		conn:       conn,
+		createTime: time.Now(),
 	}
 	return m
 }
@@ -79,9 +81,16 @@ func (s *mockServerConn) HandleHandshake(_ *frontend.Packet, _ time.Duration) (*
 	return nil, nil
 }
 func (s *mockServerConn) ExecStmt(stmt internalStmt, resp chan<- []byte) (bool, error) {
-	sendResp(makeOKPacket(8), resp)
+	if resp != nil {
+		sendResp(makeOKPacket(8), resp)
+	}
 	return true, nil
 }
+func (s *mockServerConn) GetCNServer() *CNServer   { return nil }
+func (s *mockServerConn) SetConnResponse(_ []byte) {}
+func (s *mockServerConn) GetConnResponse() []byte  { return nil }
+func (s *mockServerConn) CreateTime() time.Time    { return s.createTime }
+func (s *mockServerConn) Quit() error              { return s.Close() }
 func (s *mockServerConn) Close() error {
 	if s.conn != nil {
 		_ = s.conn.Close()
@@ -228,11 +237,17 @@ func (s *testCNServer) Start() error {
 				cid := baseConnID.Add(1)
 				c := goetty.NewIOSession(goetty.WithSessionCodec(frontend.NewSqlCodec()),
 					goetty.WithSessionConn(uint64(cid), conn))
+				pu := config.NewParameterUnit(&fp, nil, nil, nil)
+				ios, err := frontend.NewIOSession(c.RawConn(), pu)
+				if err != nil {
+					return err
+				}
 				h := &testHandler{
 					connID: cid,
 					conn:   c,
 					mysqlProto: frontend.NewMysqlClientProtocol(
-						cid, c, 0, &fp),
+						"",
+						cid, ios, 0, &fp),
 					sessionVars: make(map[string]string),
 					labels:      make(map[string]string),
 					server:      s,
@@ -281,6 +296,8 @@ func testHandle(h *testHandler) {
 				h.handleStopTxn()
 			} else if strings.HasPrefix(string(packet.Payload[1:]), "kill connection") {
 				h.handleKillConn()
+			} else if strings.Contains(string(packet.Payload[1:]), "processlist") {
+				h.handleShowProcesslist()
 			} else {
 				h.handleCommon()
 			}
@@ -336,7 +353,7 @@ func (h *testHandler) handleShowVar() {
 		res.AddColumn(c)
 	}
 	for _, c := range columns {
-		if err := h.mysqlProto.SendColumnDefinitionPacket(context.TODO(), c.(frontend.Column), 3); err != nil {
+		if _, err := h.mysqlProto.SendColumnDefinitionPacket(context.TODO(), c.(frontend.Column), 3); err != nil {
 			_ = h.mysqlProto.WritePacket(h.mysqlProto.MakeErrPayload(0, "", err.Error()))
 			return
 		}
@@ -349,7 +366,6 @@ func (h *testHandler) handleShowVar() {
 		res.AddRow(row)
 	}
 	ses := &frontend.Session{}
-	ses.SetRequestContext(context.Background())
 	h.mysqlProto.SetSession(ses)
 	if err := h.mysqlProto.SendResultSetTextBatchRow(res, res.GetRowCount()); err != nil {
 		_ = h.mysqlProto.WritePacket(h.mysqlProto.MakeErrPayload(0, "", err.Error()))
@@ -384,7 +400,7 @@ func (h *testHandler) handleShowGlobalVar() {
 		res.AddColumn(c)
 	}
 	for _, c := range columns {
-		if err := h.mysqlProto.SendColumnDefinitionPacket(context.TODO(), c.(frontend.Column), 3); err != nil {
+		if _, err := h.mysqlProto.SendColumnDefinitionPacket(context.TODO(), c.(frontend.Column), 3); err != nil {
 			_ = h.mysqlProto.WritePacket(h.mysqlProto.MakeErrPayload(0, "", err.Error()))
 			return
 		}
@@ -397,7 +413,6 @@ func (h *testHandler) handleShowGlobalVar() {
 		res.AddRow(row)
 	}
 	ses := &frontend.Session{}
-	ses.SetRequestContext(context.Background())
 	h.mysqlProto.SetSession(ses)
 	if err := h.mysqlProto.SendResultSetTextBatchRow(res, res.GetRowCount()); err != nil {
 		_ = h.mysqlProto.WritePacket(h.mysqlProto.MakeErrPayload(0, "", err.Error()))
@@ -414,6 +429,51 @@ func (h *testHandler) handleStartTxn() {
 func (h *testHandler) handleStopTxn() {
 	h.status &= ^frontend.SERVER_STATUS_IN_TRANS
 	h.handleCommon()
+}
+
+func (h *testHandler) handleShowProcesslist() {
+	h.mysqlProto.SetSequenceID(1)
+	err := h.mysqlProto.SendColumnCountPacket(2)
+	if err != nil {
+		_ = h.mysqlProto.WritePacket(h.mysqlProto.MakeErrPayload(0, "", err.Error()))
+		return
+	}
+	cols := []*plan.ColDef{
+		{Typ: plan.Type{Id: int32(types.T_varchar)}, Name: "node_id"},
+		{Typ: plan.Type{Id: int32(types.T_varchar)}, Name: "host"},
+	}
+	columns := make([]interface{}, len(cols))
+	res := &frontend.MysqlResultSet{}
+	for i, col := range cols {
+		c := new(frontend.MysqlColumn)
+		c.SetName(col.Name)
+		c.SetOrgName(col.Name)
+		c.SetTable(col.Typ.Table)
+		c.SetOrgTable(col.Typ.Table)
+		c.SetAutoIncr(col.Typ.AutoIncr)
+		c.SetSchema("")
+		c.SetDecimal(col.Typ.Scale)
+		columns[i] = c
+		res.AddColumn(c)
+	}
+	for _, c := range columns {
+		if _, err := h.mysqlProto.SendColumnDefinitionPacket(context.TODO(), c.(frontend.Column), 3); err != nil {
+			_ = h.mysqlProto.WritePacket(h.mysqlProto.MakeErrPayload(0, "", err.Error()))
+			return
+		}
+	}
+	_ = h.mysqlProto.WritePacket(h.mysqlProto.MakeEOFPayload(0, h.status))
+	row := make([]interface{}, 2)
+	row[0] = "node1"
+	row[1] = "host1"
+	res.AddRow(row)
+	ses := &frontend.Session{}
+	h.mysqlProto.SetSession(ses)
+	if err := h.mysqlProto.SendResultSetTextBatchRow(res, res.GetRowCount()); err != nil {
+		_ = h.mysqlProto.WritePacket(h.mysqlProto.MakeErrPayload(0, "", err.Error()))
+		return
+	}
+	_ = h.mysqlProto.WritePacket(h.mysqlProto.MakeEOFPayload(0, h.status))
 }
 
 func (s *testCNServer) Stop() error {

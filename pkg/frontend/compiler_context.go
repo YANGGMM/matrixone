@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,11 +30,12 @@ import (
 
 	"github.com/matrixorigin/matrixone/pkg/catalog"
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
+	"github.com/matrixorigin/matrixone/pkg/common/pubsub"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/defines"
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
 	pb "github.com/matrixorigin/matrixone/pkg/pb/statsinfo"
-	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
+	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect/mysql"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
 	"github.com/matrixorigin/matrixone/pkg/sql/plan/function"
@@ -45,47 +47,82 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/vm/process"
 )
 
+var _ plan2.CompilerContext = &TxnCompilerContext{}
+
 type TxnCompilerContext struct {
 	dbName               string
-	txnHandler           *TxnHandler
-	ses                  FeSession
-	proc                 *process.Process
 	buildAlterView       bool
 	dbOfView, nameOfView string
 	sub                  *plan.SubscriptionMeta
-	restoreInfo          *plan2.RestoreInfo
+	snapshot             *plan2.Snapshot
+	views                []string
 	//for support explain analyze
-	tcw *TxnComputationWrapper
-	mu  sync.Mutex
+	tcw     ComputationWrapper
+	execCtx *ExecCtx
+	mu      sync.Mutex
 }
 
-var _ plan2.CompilerContext = &TxnCompilerContext{}
-
-func (tcc *TxnCompilerContext) GetRestoreInfo() *plan2.RestoreInfo {
+func (tcc *TxnCompilerContext) Close() {
 	tcc.mu.Lock()
 	defer tcc.mu.Unlock()
-	return tcc.restoreInfo
+	tcc.execCtx = nil
+	tcc.snapshot = nil
+	tcc.views = nil
 }
 
-func (tcc *TxnCompilerContext) SetRestoreInfo(restoreInfo *plan2.RestoreInfo) {
+func (tcc *TxnCompilerContext) GetLowerCaseTableNames() int64 {
 	tcc.mu.Lock()
 	defer tcc.mu.Unlock()
-	tcc.restoreInfo = restoreInfo
+	val, err := tcc.execCtx.ses.GetSessionSysVar("lower_case_table_names")
+	if err != nil {
+		val = int64(1)
+	}
+	return val.(int64)
 }
 
-func (tcc *TxnCompilerContext) ReplacePlan(execPlan *plan.Execute) (*plan.Plan, tree.Statement, error) {
-	p, st, _, err := replacePlan(tcc.ses.GetRequestContext(), tcc.ses.(*Session), tcc.tcw, execPlan)
+func (tcc *TxnCompilerContext) SetExecCtx(execCtx *ExecCtx) {
+	tcc.mu.Lock()
+	defer tcc.mu.Unlock()
+	tcc.execCtx = execCtx
+}
+
+func (tcc *TxnCompilerContext) GetViews() []string {
+	tcc.mu.Lock()
+	defer tcc.mu.Unlock()
+	return tcc.views
+}
+
+func (tcc *TxnCompilerContext) SetViews(views []string) {
+	tcc.mu.Lock()
+	defer tcc.mu.Unlock()
+	tcc.views = views
+}
+
+func (tcc *TxnCompilerContext) GetSnapshot() *plan2.Snapshot {
+	tcc.mu.Lock()
+	defer tcc.mu.Unlock()
+	return tcc.snapshot
+}
+
+func (tcc *TxnCompilerContext) SetSnapshot(snapshot *plan2.Snapshot) {
+	tcc.mu.Lock()
+	defer tcc.mu.Unlock()
+	tcc.snapshot = snapshot
+}
+
+func (tcc *TxnCompilerContext) InitExecuteStmtParam(execPlan *plan.Execute) (*plan.Plan, tree.Statement, error) {
+	_, p, st, _, err := initExecuteStmtParam(tcc.execCtx.reqCtx, tcc.execCtx.ses.(*Session), tcc.tcw.(*TxnComputationWrapper), execPlan)
 	return p, st, err
 }
 
 func (tcc *TxnCompilerContext) GetStatsCache() *plan2.StatsCache {
 	tcc.mu.Lock()
 	defer tcc.mu.Unlock()
-	return tcc.ses.GetStatsCache()
+	return tcc.execCtx.ses.GetStatsCache()
 }
 
-func InitTxnCompilerContext(txn *TxnHandler, db string) *TxnCompilerContext {
-	return &TxnCompilerContext{txnHandler: txn, dbName: db}
+func InitTxnCompilerContext(db string) *TxnCompilerContext {
+	return &TxnCompilerContext{dbName: db}
 }
 
 func (tcc *TxnCompilerContext) SetBuildingAlterView(yesOrNo bool, dbName, viewName string) {
@@ -102,34 +139,34 @@ func (tcc *TxnCompilerContext) GetBuildingAlterView() (bool, string, string) {
 	return tcc.buildAlterView, tcc.dbOfView, tcc.nameOfView
 }
 
-func (tcc *TxnCompilerContext) SetSession(ses FeSession) {
-	tcc.mu.Lock()
-	defer tcc.mu.Unlock()
-	tcc.ses = ses
-}
-
 func (tcc *TxnCompilerContext) GetSession() FeSession {
 	tcc.mu.Lock()
 	defer tcc.mu.Unlock()
-	return tcc.ses
+	return tcc.execCtx.ses
 }
 
 func (tcc *TxnCompilerContext) GetTxnHandler() *TxnHandler {
 	tcc.mu.Lock()
 	defer tcc.mu.Unlock()
-	return tcc.txnHandler
+	return tcc.execCtx.ses.GetTxnHandler()
 }
 
 func (tcc *TxnCompilerContext) GetUserName() string {
 	tcc.mu.Lock()
 	defer tcc.mu.Unlock()
-	return tcc.ses.GetUserName()
+	return tcc.execCtx.ses.GetUserName()
 }
 
 func (tcc *TxnCompilerContext) SetDatabase(db string) {
 	tcc.mu.Lock()
 	defer tcc.mu.Unlock()
 	tcc.dbName = db
+}
+
+func (tcc *TxnCompilerContext) GetDatabase() string {
+	tcc.mu.Lock()
+	defer tcc.mu.Unlock()
+	return tcc.dbName
 }
 
 func (tcc *TxnCompilerContext) DefaultDatabase() string {
@@ -143,40 +180,36 @@ func (tcc *TxnCompilerContext) GetRootSql() string {
 }
 
 func (tcc *TxnCompilerContext) GetAccountId() (uint32, error) {
-	return tcc.ses.GetAccountId(), nil
+	return tcc.execCtx.ses.GetAccountId(), nil
 }
 
 func (tcc *TxnCompilerContext) GetContext() context.Context {
-	return tcc.ses.GetRequestContext()
+	return tcc.execCtx.reqCtx
 }
 
-func (tcc *TxnCompilerContext) DatabaseExists(name string, snapshot plan2.Snapshot) bool {
-	var err error
-	var txnCtx context.Context
-	var txn TxnOperator
+func (tcc *TxnCompilerContext) SetContext(ctx context.Context) {
+	tcc.execCtx.reqCtx = ctx
+}
 
-	txnCtx, txn, err = tcc.GetTxnHandler().GetTxn()
-	if err != nil {
-		return false
-	}
+func (tcc *TxnCompilerContext) DatabaseExists(name string, snapshot *plan2.Snapshot) bool {
+	var err error
+	tempCtx := tcc.execCtx.reqCtx
+	txn := tcc.GetTxnHandler().GetTxn()
 
 	// change txn to snapshot txn
-	if snapshot.TS != nil {
-		if !snapshot.TS.Equal(timestamp.Timestamp{PhysicalTime: 0, LogicalTime: 0}) &&
-			snapshot.TS.Less(txn.Txn().SnapshotTS) {
-			txn = txn.CloneSnapshotOp(*snapshot.TS)
+	if plan2.IsSnapshotValid(snapshot) && snapshot.TS.Less(txn.Txn().SnapshotTS) {
+		txn = txn.CloneSnapshotOp(*snapshot.TS)
 
-			if snapshot.CreatedByTenant != nil {
-				txnCtx = context.WithValue(txnCtx, defines.TenantIDKey{}, snapshot.CreatedByTenant.TenantID)
-			}
+		if snapshot.Tenant != nil {
+			tempCtx = context.WithValue(tempCtx, defines.TenantIDKey{}, snapshot.Tenant.TenantID)
 		}
 	}
 
 	//open database
 	ses := tcc.GetSession()
-	_, err = tcc.GetTxnHandler().GetStorage().Database(txnCtx, name, txn)
+	_, err = tcc.GetTxnHandler().GetStorage().Database(tempCtx, name, txn)
 	if err != nil {
-		logError(ses, ses.GetDebugString(),
+		ses.Error(tempCtx,
 			"Failed to get database",
 			zap.String("databaseName", name),
 			zap.Error(err))
@@ -186,61 +219,79 @@ func (tcc *TxnCompilerContext) DatabaseExists(name string, snapshot plan2.Snapsh
 	return true
 }
 
-func (tcc *TxnCompilerContext) GetDatabaseId(dbName string, snapshot plan2.Snapshot) (uint64, error) {
+func (tcc *TxnCompilerContext) GetDatabaseId(dbName string, snapshot *plan2.Snapshot) (uint64, error) {
 	dbName, _, err := tcc.ensureDatabaseIsNotEmpty(dbName, false, snapshot)
 	if err != nil {
 		return 0, err
 	}
-
-	txnCtx, txn, err := tcc.GetTxnHandler().GetTxn()
-	if err != nil {
-		return 0, err
-	}
+	tempCtx := tcc.execCtx.reqCtx
+	txn := tcc.GetTxnHandler().GetTxn()
 	// change txn to snapshot txn
-	if snapshot.TS != nil {
-		if !snapshot.TS.Equal(timestamp.Timestamp{PhysicalTime: 0, LogicalTime: 0}) &&
-			snapshot.TS.Less(txn.Txn().SnapshotTS) {
-			txn = txn.CloneSnapshotOp(*snapshot.TS)
 
-			if snapshot.CreatedByTenant != nil {
-				txnCtx = context.WithValue(txnCtx, defines.TenantIDKey{}, snapshot.CreatedByTenant.TenantID)
-			}
+	if plan2.IsSnapshotValid(snapshot) && snapshot.TS.Less(txn.Txn().SnapshotTS) {
+		txn = txn.CloneSnapshotOp(*snapshot.TS)
+
+		if snapshot.Tenant != nil {
+			tempCtx = context.WithValue(tempCtx, defines.TenantIDKey{}, snapshot.Tenant.TenantID)
 		}
 	}
 
-	database, err := tcc.GetTxnHandler().GetStorage().Database(txnCtx, dbName, txn)
+	database, err := tcc.GetTxnHandler().GetStorage().Database(tempCtx, dbName, txn)
 	if err != nil {
 		return 0, err
 	}
-	databaseId, err := strconv.ParseUint(database.GetDatabaseId(txnCtx), 10, 64)
+	databaseId, err := strconv.ParseUint(database.GetDatabaseId(tempCtx), 10, 64)
 	if err != nil {
-		return 0, moerr.NewInternalError(txnCtx, "The databaseid of '%s' is not a valid number", dbName)
+		return 0, moerr.NewInternalErrorf(tempCtx, "The databaseid of '%s' is not a valid number", dbName)
 	}
 	return databaseId, nil
 }
 
+func (tcc *TxnCompilerContext) GetDbLevelConfig(dbName string, varName string) (string, error) {
+	switch varName {
+	case "unique_check_on_autoincr":
+		// check if the database is a system database
+		if _, ok := sysDatabases[dbName]; !ok {
+			ses := tcc.GetSession()
+			if _, ok := ses.(*backSession); ok {
+				return "None", nil
+			}
+			ret, err := ses.GetConfig(tcc.GetContext(), dbName, varName)
+			if err != nil {
+				return "", err
+			}
+			if ret != nil {
+				return ret.(string), nil
+			}
+			return "None", nil
+		}
+		return "Check", nil
+	default:
+	}
+	return "", moerr.NewInternalErrorf(tcc.GetContext(), "The variable '%s' is not a valid database level variable", varName)
+}
+
 // getRelation returns the context (maybe updated) and the relation
-func (tcc *TxnCompilerContext) getRelation(dbName string, tableName string, sub *plan.SubscriptionMeta, snapshot plan2.Snapshot) (context.Context, engine.Relation, error) {
+func (tcc *TxnCompilerContext) getRelation(dbName string, tableName string, sub *plan.SubscriptionMeta, snapshot *plan2.Snapshot) (context.Context, engine.Relation, error) {
 	dbName, _, err := tcc.ensureDatabaseIsNotEmpty(dbName, false, snapshot)
 	if err != nil {
 		return nil, nil, err
 	}
 
+	start := time.Now()
+	defer func() {
+		v2.GetRelationDurationHistogram.Observe(time.Since(start).Seconds())
+	}()
+
 	ses := tcc.GetSession()
+	txn := tcc.GetTxnHandler().GetTxn()
+	tempCtx := tcc.execCtx.reqCtx
 
-	txnCtx, txn, err := tcc.GetTxnHandler().GetTxn()
-	if err != nil {
-		return nil, nil, err
-	}
+	if plan2.IsSnapshotValid(snapshot) && snapshot.TS.Less(txn.Txn().SnapshotTS) {
+		txn = txn.CloneSnapshotOp(*snapshot.TS)
 
-	if snapshot.TS != nil {
-		if !snapshot.TS.Equal(timestamp.Timestamp{PhysicalTime: 0, LogicalTime: 0}) &&
-			snapshot.TS.Less(txn.Txn().SnapshotTS) {
-			txn = txn.CloneSnapshotOp(*snapshot.TS)
-
-			if snapshot.CreatedByTenant != nil {
-				txnCtx = context.WithValue(txnCtx, defines.TenantIDKey{}, snapshot.CreatedByTenant.TenantID)
-			}
+		if snapshot.Tenant != nil {
+			tempCtx = context.WithValue(tempCtx, defines.TenantIDKey{}, snapshot.Tenant.TenantID)
 		}
 	}
 
@@ -248,37 +299,37 @@ func (tcc *TxnCompilerContext) getRelation(dbName string, tableName string, sub 
 	if isClusterTable(dbName, tableName) {
 		//if it is the cluster table in the general account, switch into the sys account
 		if account != nil && account.GetTenantID() != sysAccountID {
-			txnCtx = defines.AttachAccountId(txnCtx, sysAccountID)
+			tempCtx = defines.AttachAccountId(tempCtx, sysAccountID)
 		}
 	}
 	if sub != nil {
-		txnCtx = defines.AttachAccountId(txnCtx, uint32(sub.AccountId))
+		tempCtx = defines.AttachAccountId(tempCtx, uint32(sub.AccountId))
 		dbName = sub.DbName
 	}
 
 	//for system_metrics.metric and system.statement_info,
 	//it is special under the no sys account, should switch into the sys account first.
 	if dbName == catalog.MO_SYSTEM && tableName == catalog.MO_STATEMENT {
-		txnCtx = defines.AttachAccountId(txnCtx, uint32(sysAccountID))
+		tempCtx = defines.AttachAccountId(tempCtx, uint32(sysAccountID))
 	}
 
 	if dbName == catalog.MO_SYSTEM_METRICS && (tableName == catalog.MO_METRIC || tableName == catalog.MO_SQL_STMT_CU) {
-		txnCtx = defines.AttachAccountId(txnCtx, uint32(sysAccountID))
+		tempCtx = defines.AttachAccountId(tempCtx, uint32(sysAccountID))
 	}
 
-	//if restoreInfo := tcc.GetRestoreInfo(); restoreInfo != nil {
-	//	txnCtx = defines.AttachAccountId(txnCtx, restoreInfo.TenantID)
-	//}
+	start1 := time.Now()
 
 	//open database
-	db, err := tcc.GetTxnHandler().GetStorage().Database(txnCtx, dbName, txn)
+	db, err := tcc.GetTxnHandler().GetStorage().Database(tempCtx, dbName, txn)
 	if err != nil {
-		logError(ses, ses.GetDebugString(),
+		ses.Error(tempCtx,
 			"Failed to get database",
 			zap.String("databaseName", dbName),
 			zap.Error(err))
 		return nil, nil, err
 	}
+
+	v2.OpenDBDurationHistogram.Observe(time.Since(start1).Seconds())
 
 	// tableNames, err := db.Relations(ctx)
 	// if err != nil {
@@ -286,12 +337,14 @@ func (tcc *TxnCompilerContext) getRelation(dbName string, tableName string, sub 
 	// }
 	// logDebugf(ses.GetDebugString(), "dbName %v tableNames %v", dbName, tableNames)
 
+	start2 := time.Now()
+
 	//open table
-	table, err := db.Relation(txnCtx, tableName, nil)
+	table, err := db.Relation(tempCtx, tableName, nil)
 	if err != nil {
-		tmpTable, e := tcc.getTmpRelation(txnCtx, engine.GetTempTableName(dbName, tableName))
+		tmpTable, e := tcc.getTmpRelation(tempCtx, engine.GetTempTableName(dbName, tableName))
 		if e != nil {
-			logError(ses, ses.GetDebugString(),
+			ses.Error(tempCtx,
 				"Failed to get table",
 				zap.String("tableName", tableName),
 				zap.Error(err))
@@ -300,27 +353,35 @@ func (tcc *TxnCompilerContext) getRelation(dbName string, tableName string, sub 
 			table = tmpTable
 		}
 	}
-	return txnCtx, table, nil
+
+	v2.OpenTableDurationHistogram.Observe(time.Since(start2).Seconds())
+
+	return tempCtx, table, nil
 }
 
-func (tcc *TxnCompilerContext) getTmpRelation(_ context.Context, tableName string) (engine.Relation, error) {
-	e := tcc.ses.GetStorage()
-	txnCtx, txn, err := tcc.txnHandler.GetTxn()
+func (tcc *TxnCompilerContext) getTmpRelation(ctx context.Context, tableName string) (engine.Relation, error) {
+	start := time.Now()
+	defer func() {
+		v2.GetTmpTableDurationHistogram.Observe(time.Since(start).Seconds())
+	}()
+	e := tcc.execCtx.ses.GetTxnHandler().GetStorage()
+	txn := tcc.execCtx.ses.GetTxnHandler().GetTxn()
+	db, err := e.Database(ctx, defines.TEMPORARY_DBNAME, txn)
 	if err != nil {
-		return nil, err
-	}
-	db, err := e.Database(txnCtx, defines.TEMPORARY_DBNAME, txn)
-	if err != nil {
-		logError(tcc.ses, tcc.ses.GetDebugString(),
+		tcc.execCtx.ses.Error(ctx,
 			"Failed to get temp database",
 			zap.Error(err))
 		return nil, err
 	}
-	table, err := db.Relation(txnCtx, tableName, nil)
+	table, err := db.Relation(ctx, tableName, nil)
 	return table, err
 }
 
-func (tcc *TxnCompilerContext) ensureDatabaseIsNotEmpty(dbName string, checkSub bool, snapshot plan2.Snapshot) (string, *plan.SubscriptionMeta, error) {
+func (tcc *TxnCompilerContext) ensureDatabaseIsNotEmpty(dbName string, checkSub bool, snapshot *plan2.Snapshot) (string, *plan.SubscriptionMeta, error) {
+	start := time.Now()
+	defer func() {
+		v2.EnsureDatabaseDurationHistogram.Observe(time.Since(start).Seconds())
+	}()
 	if len(dbName) == 0 {
 		dbName = tcc.DefaultDatabase()
 	}
@@ -338,24 +399,19 @@ func (tcc *TxnCompilerContext) ensureDatabaseIsNotEmpty(dbName string, checkSub 
 	return dbName, sub, nil
 }
 
-func (tcc *TxnCompilerContext) ResolveById(tableId uint64, snapshot plan2.Snapshot) (*plan2.ObjectRef, *plan2.TableDef) {
-	txnCtx, txn, err := tcc.GetTxnHandler().GetTxn()
-	if err != nil {
-		return nil, nil
-	}
+func (tcc *TxnCompilerContext) ResolveById(tableId uint64, snapshot *plan2.Snapshot) (*plan2.ObjectRef, *plan2.TableDef) {
+	tempCtx := tcc.execCtx.reqCtx
+	txn := tcc.GetTxnHandler().GetTxn()
 
-	if snapshot.TS != nil {
-		if !snapshot.TS.Equal(timestamp.Timestamp{PhysicalTime: 0, LogicalTime: 0}) &&
-			snapshot.TS.Less(txn.Txn().SnapshotTS) {
-			txn = txn.CloneSnapshotOp(*snapshot.TS)
+	if plan2.IsSnapshotValid(snapshot) && snapshot.TS.Less(txn.Txn().SnapshotTS) {
+		txn = txn.CloneSnapshotOp(*snapshot.TS)
 
-			if snapshot.CreatedByTenant != nil {
-				txnCtx = context.WithValue(txnCtx, defines.TenantIDKey{}, snapshot.CreatedByTenant.TenantID)
-			}
+		if snapshot.Tenant != nil {
+			tempCtx = context.WithValue(tempCtx, defines.TenantIDKey{}, snapshot.Tenant.TenantID)
 		}
 	}
 
-	dbName, tableName, table, err := tcc.GetTxnHandler().GetStorage().GetRelationById(txnCtx, txn, tableId)
+	dbName, tableName, table, err := tcc.GetTxnHandler().GetStorage().GetRelationById(tempCtx, txn, tableId)
 	if err != nil {
 		return nil, nil
 	}
@@ -366,19 +422,16 @@ func (tcc *TxnCompilerContext) ResolveById(tableId uint64, snapshot plan2.Snapsh
 		ObjName:    tableName,
 		Obj:        int64(tableId),
 	}
-	tableDef := table.CopyTableDef(txnCtx)
+	tableDef := table.CopyTableDef(tempCtx)
 	return obj, tableDef
 }
 
-func (tcc *TxnCompilerContext) ResolveSubscriptionTableById(tableId uint64, pubmeta *plan.SubscriptionMeta) (*plan2.ObjectRef, *plan2.TableDef) {
-	txnCtx, txn, err := tcc.GetTxnHandler().GetTxn()
-	if err != nil {
-		return nil, nil
-	}
+func (tcc *TxnCompilerContext) ResolveSubscriptionTableById(tableId uint64, subMeta *plan.SubscriptionMeta) (*plan2.ObjectRef, *plan2.TableDef) {
+	txn := tcc.GetTxnHandler().GetTxn()
 
-	pubContext := txnCtx
-	if pubmeta != nil {
-		pubContext = context.WithValue(pubContext, defines.TenantIDKey{}, uint32(pubmeta.AccountId))
+	pubContext := tcc.execCtx.reqCtx
+	if subMeta != nil {
+		pubContext = context.WithValue(pubContext, defines.TenantIDKey{}, uint32(subMeta.AccountId))
 	}
 
 	dbName, tableName, table, err := tcc.GetTxnHandler().GetStorage().GetRelationById(pubContext, txn, tableId)
@@ -392,17 +445,46 @@ func (tcc *TxnCompilerContext) ResolveSubscriptionTableById(tableId uint64, pubm
 		ObjName:    tableName,
 		Obj:        int64(tableId),
 	}
-	tableDef := table.CopyTableDef(txnCtx)
+	tableDef := table.CopyTableDef(pubContext)
 	return obj, tableDef
 }
 
-func (tcc *TxnCompilerContext) Resolve(dbName string, tableName string, snapshot plan2.Snapshot) (*plan2.ObjectRef, *plan2.TableDef) {
+func (tcc *TxnCompilerContext) checkTableDefChange(dbName string, tableName string, originTblId uint64, originVersion uint32) (bool, error) {
+	// In order to be compatible with various GUI clients and BI tools, lower case db and table name if it's a mysql system table
+	if slices.Contains(mysql.CaseInsensitiveDbs, strings.ToLower(dbName)) {
+		dbName = strings.ToLower(dbName)
+		tableName = strings.ToLower(tableName)
+	}
+
+	dbName, sub, err := tcc.ensureDatabaseIsNotEmpty(dbName, true, nil)
+	if err != nil || sub != nil && !pubsub.InSubMetaTables(sub, tableName) {
+		return false, err
+	}
+
+	ctx, table, err := tcc.getRelation(dbName, tableName, sub, nil)
+	if err != nil {
+		return false, moerr.NewNoSuchTableNoCtx(dbName, tableName)
+	}
+
+	return table.GetTableDef(ctx).Version != originVersion || table.GetTableID(ctx) != originTblId, nil
+}
+
+func (tcc *TxnCompilerContext) Resolve(dbName string, tableName string, snapshot *plan2.Snapshot) (*plan2.ObjectRef, *plan2.TableDef) {
 	start := time.Now()
 	defer func() {
-		v2.TxnStatementResolveDurationHistogram.Observe(time.Since(start).Seconds())
+		end := time.Since(start).Seconds()
+		v2.TxnStatementResolveDurationHistogram.Observe(end)
+		v2.TotalResolveDurationHistogram.Observe(end)
 	}()
+
+	// In order to be compatible with various GUI clients and BI tools, lower case db and table name if it's a mysql system table
+	if slices.Contains(mysql.CaseInsensitiveDbs, strings.ToLower(dbName)) {
+		dbName = strings.ToLower(dbName)
+		tableName = strings.ToLower(tableName)
+	}
+
 	dbName, sub, err := tcc.ensureDatabaseIsNotEmpty(dbName, true, snapshot)
-	if err != nil {
+	if err != nil || sub != nil && !pubsub.InSubMetaTables(sub, tableName) {
 		return nil, nil
 	}
 
@@ -414,7 +496,6 @@ func (tcc *TxnCompilerContext) Resolve(dbName string, tableName string, snapshot
 	if tableDef.IsTemporary {
 		tableDef.Name = tableName
 	}
-	tableDef.DbName = dbName
 
 	// convert
 	var subscriptionName string
@@ -451,7 +532,7 @@ func (tcc *TxnCompilerContext) ResolveUdf(name string, args []*plan.Expr) (udf *
 		v2.TxnStatementResolveUdfDurationHistogram.Observe(time.Since(start).Seconds())
 	}()
 	ses := tcc.GetSession()
-	ctx := ses.GetRequestContext()
+	ctx := tcc.execCtx.reqCtx
 
 	err = inputNameIsInvalid(ctx, name)
 	if err != nil {
@@ -593,13 +674,12 @@ func (tcc *TxnCompilerContext) ResolveUdf(name string, args []*plan.Expr) (udf *
 
 		return nil, err
 	} else {
-		return nil, moerr.NewNotSupported(ctx, "function or operator '%s'", name)
+		return nil, moerr.NewNotSupportedf(ctx, "function or operator '%s'", name)
 	}
 }
 
-func (tcc *TxnCompilerContext) ResolveVariable(varName string, isSystemVar, isGlobalVar bool) (interface{}, error) {
-	ses := tcc.GetSession()
-	ctx := ses.GetRequestContext()
+func (tcc *TxnCompilerContext) ResolveVariable(varName string, isSystemVar, isGlobalVar bool) (varValue interface{}, err error) {
+	ctx := tcc.execCtx.reqCtx
 
 	if ctx.Value(defines.InSp{}) != nil && ctx.Value(defines.InSp{}).(bool) {
 		tmpScope := ctx.Value(defines.VarScopeKey{}).(*[]map[string]interface{})
@@ -613,17 +693,24 @@ func (tcc *TxnCompilerContext) ResolveVariable(varName string, isSystemVar, isGl
 
 	if isSystemVar {
 		if isGlobalVar {
-			return tcc.GetSession().getGlobalSystemVariableValue(varName)
+			if varValue, err = tcc.GetSession().GetGlobalSysVar(varName); err != nil {
+				return
+			}
 		} else {
-			return tcc.GetSession().GetSessionVar(varName)
+			if varValue, err = tcc.GetSession().GetSessionSysVar(varName); err != nil {
+				return
+			}
 		}
 	} else {
-		_, val, err := tcc.GetSession().GetUserDefinedVar(varName)
-		if val == nil {
+		var udVar *UserDefinedVar
+		if udVar, err = tcc.GetSession().GetUserDefinedVar(varName); err != nil || udVar == nil {
 			return nil, err
 		}
-		return val.Value, err
+
+		varValue = udVar.Value
 	}
+
+	return
 }
 
 func (tcc *TxnCompilerContext) ResolveAccountIds(accountNames []string) (accountIds []uint32, err error) {
@@ -640,7 +727,7 @@ func (tcc *TxnCompilerContext) ResolveAccountIds(accountNames []string) (account
 	}
 
 	ses := tcc.GetSession()
-	ctx := ses.GetRequestContext()
+	ctx := tcc.execCtx.reqCtx
 	bh := ses.GetBackgroundExec(ctx)
 	defer bh.Close()
 
@@ -677,15 +764,15 @@ func (tcc *TxnCompilerContext) ResolveAccountIds(accountNames []string) (account
 			}
 			accountIds = append(accountIds, uint32(targetAccountId))
 		} else {
-			return nil, moerr.NewInternalError(ctx, "there is no account %s", name)
+			return nil, moerr.NewInternalErrorf(ctx, "there is no account %s", name)
 		}
 	}
 	return accountIds, err
 }
 
-func (tcc *TxnCompilerContext) GetPrimaryKeyDef(dbName string, tableName string, snapshot plan2.Snapshot) []*plan2.ColDef {
+func (tcc *TxnCompilerContext) GetPrimaryKeyDef(dbName string, tableName string, snapshot *plan2.Snapshot) []*plan2.ColDef {
 	dbName, sub, err := tcc.ensureDatabaseIsNotEmpty(dbName, true, snapshot)
-	if err != nil {
+	if err != nil || sub != nil && !pubsub.InSubMetaTables(sub, tableName) {
 		return nil
 	}
 	ctx, relation, err := tcc.getRelation(dbName, tableName, sub, snapshot)
@@ -704,7 +791,8 @@ func (tcc *TxnCompilerContext) GetPrimaryKeyDef(dbName string, tableName string,
 	priDefs := make([]*plan2.ColDef, 0, len(priKeys))
 	for _, key := range priKeys {
 		priDefs = append(priDefs, &plan2.ColDef{
-			Name: key.Name,
+			Name:       strings.ToLower(key.Name),
+			OriginName: key.Name,
 			Typ: plan2.Type{
 				Id:    int32(key.Type.Oid),
 				Width: key.Type.Width,
@@ -716,13 +804,14 @@ func (tcc *TxnCompilerContext) GetPrimaryKeyDef(dbName string, tableName string,
 	return priDefs
 }
 
-func (tcc *TxnCompilerContext) Stats(obj *plan2.ObjectRef, snapshot plan2.Snapshot) (*pb.StatsInfo, error) {
+func (tcc *TxnCompilerContext) Stats(obj *plan2.ObjectRef, snapshot *plan2.Snapshot) (*pb.StatsInfo, error) {
 	start := time.Now()
 	defer func() {
 		v2.TxnStatementStatsDurationHistogram.Observe(time.Since(start).Seconds())
 	}()
 
 	dbName := obj.GetSchemaName()
+	tableName := obj.GetObjName()
 	checkSub := true
 	if obj.PubInfo != nil {
 		checkSub = false
@@ -731,31 +820,70 @@ func (tcc *TxnCompilerContext) Stats(obj *plan2.ObjectRef, snapshot plan2.Snapsh
 	if err != nil {
 		return nil, err
 	}
+	if sub != nil && !pubsub.InSubMetaTables(sub, tableName) {
+		return nil, moerr.NewInternalErrorNoCtxf("table %s not found in publication %s", tableName, sub.Name)
+	}
 	if !checkSub {
 		sub = &plan.SubscriptionMeta{
 			AccountId: obj.PubInfo.TenantId,
 			DbName:    dbName,
 		}
 	}
-	tableName := obj.GetObjName()
 	ctx, table, err := tcc.getRelation(dbName, tableName, sub, snapshot)
 	if err != nil {
 		return nil, err
 	}
-	s, needUpdate := tcc.statsInCache(ctx, dbName, table, snapshot)
-	if s == nil {
+	cached, needUpdate := tcc.statsInCache(ctx, dbName, table, snapshot)
+	if cached == nil {
 		return nil, nil
 	}
-	if needUpdate {
-		s, err = table.Stats(ctx, true)
-		if err != nil {
-			return s, err
-		}
-		if s != nil {
-			tcc.UpdateStatsInCache(table.GetTableID(ctx), s)
+	if !needUpdate {
+		return cached, nil
+	}
+	tableDefs, err := table.TableDefs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var partitionInfo *plan.PartitionByDef
+	for _, def := range tableDefs {
+		if partitionDef, ok := def.(*engine.PartitionDef); ok {
+			if partitionDef.Partitioned > 0 {
+				p := &plan.PartitionByDef{}
+				err = p.UnMarshalPartitionInfo(([]byte)(partitionDef.Partition))
+				if err != nil {
+					return nil, err
+				}
+				partitionInfo = p
+			}
+			break
 		}
 	}
-	return s, nil
+	var statsInfo *pb.StatsInfo
+	// This is a partition table.
+	if partitionInfo != nil {
+		statsInfo = plan2.NewStatsInfo()
+		for _, partitionTable := range partitionInfo.PartitionTableNames {
+			parCtx, parTable, err := tcc.getRelation(dbName, partitionTable, sub, snapshot)
+			if err != nil {
+				return cached, err
+			}
+			parStats, err := parTable.Stats(parCtx, true)
+			if err != nil {
+				return cached, err
+			}
+			statsInfo.Merge(parStats)
+		}
+	} else {
+		statsInfo, err = table.Stats(ctx, true)
+		if err != nil {
+			return cached, err
+		}
+	}
+	if statsInfo != nil {
+		tcc.UpdateStatsInCache(table.GetTableID(ctx), statsInfo)
+		return statsInfo, nil
+	}
+	return cached, nil
 }
 
 func (tcc *TxnCompilerContext) UpdateStatsInCache(tid uint64, s *pb.StatsInfo) {
@@ -764,7 +892,7 @@ func (tcc *TxnCompilerContext) UpdateStatsInCache(tid uint64, s *pb.StatsInfo) {
 
 // statsInCache get the *pb.StatsInfo from session cache. If the info is nil, just return nil and false,
 // else, check if the info needs to be updated.
-func (tcc *TxnCompilerContext) statsInCache(ctx context.Context, dbName string, table engine.Relation, snapshot plan2.Snapshot) (*pb.StatsInfo, bool) {
+func (tcc *TxnCompilerContext) statsInCache(ctx context.Context, dbName string, table engine.Relation, snapshot *plan2.Snapshot) (*pb.StatsInfo, bool) {
 	s := tcc.GetStatsCache().GetStatsInfo(table.GetTableID(ctx), true)
 	if s == nil {
 		return nil, false
@@ -790,7 +918,10 @@ func (tcc *TxnCompilerContext) statsInCache(ctx context.Context, dbName string, 
 	approxNumObjects := 0
 	if partitionInfo != nil {
 		for _, PartitionTableName := range partitionInfo.PartitionTableNames {
-			_, ptable, _ := tcc.getRelation(dbName, PartitionTableName, nil, snapshot)
+			_, ptable, err := tcc.getRelation(dbName, PartitionTableName, nil, snapshot)
+			if err != nil {
+				return nil, false
+			}
 			approxNumObjects += ptable.ApproxObjectsNum(ctx)
 		}
 	} else {
@@ -808,15 +939,15 @@ func (tcc *TxnCompilerContext) statsInCache(ctx context.Context, dbName string, 
 func (tcc *TxnCompilerContext) GetProcess() *process.Process {
 	tcc.mu.Lock()
 	defer tcc.mu.Unlock()
-	return tcc.proc
+	return tcc.execCtx.proc
 }
 
 func (tcc *TxnCompilerContext) GetQueryResultMeta(uuid string) ([]*plan.ColDef, string, error) {
-	proc := tcc.proc
+	proc := tcc.execCtx.proc
 	// get file size
-	path := catalog.BuildQueryResultMetaPath(proc.SessionInfo.Account, uuid)
+	path := catalog.BuildQueryResultMetaPath(proc.GetSessionInfo().Account, uuid)
 	// read meta's meta
-	reader, err := blockio.NewFileReader(proc.FileService, path)
+	reader, err := blockio.NewFileReader(proc.GetService(), proc.Base.FileService, path)
 	if err != nil {
 		return nil, "", err
 	}
@@ -824,10 +955,10 @@ func (tcc *TxnCompilerContext) GetQueryResultMeta(uuid string) ([]*plan.ColDef, 
 	idxs[0] = catalog.COLUMNS_IDX
 	idxs[1] = catalog.RESULT_PATH_IDX
 	// read meta's data
-	bats, release, err := reader.LoadAllColumns(proc.Ctx, idxs, common.DefaultAllocator)
+	bats, release, err := reader.LoadAllColumns(tcc.execCtx.reqCtx, idxs, common.DefaultAllocator)
 	if err != nil {
 		if moerr.IsMoErrCode(err, moerr.ErrFileNotFound) {
-			return nil, "", moerr.NewResultFileNotFound(proc.Ctx, makeResultMetaPath(proc.SessionInfo.Account, uuid))
+			return nil, "", moerr.NewResultFileNotFound(tcc.execCtx.reqCtx, makeResultMetaPath(proc.Base.SessionInfo.Account, uuid))
 		}
 		return nil, "", err
 	}
@@ -838,7 +969,7 @@ func (tcc *TxnCompilerContext) GetQueryResultMeta(uuid string) ([]*plan.ColDef, 
 	}()
 	// cols
 	vec := bats[0].Vecs[0]
-	def := vec.GetStringAt(0)
+	def := vec.UnsafeGetStringAt(0)
 	r := &plan.ResultColDef{}
 	if err = r.Unmarshal([]byte(def)); err != nil {
 		return nil, "", err
@@ -849,34 +980,23 @@ func (tcc *TxnCompilerContext) GetQueryResultMeta(uuid string) ([]*plan.ColDef, 
 	return r.ResultCols, str, nil
 }
 
-func (tcc *TxnCompilerContext) SetProcess(proc *process.Process) {
-	tcc.mu.Lock()
-	defer tcc.mu.Unlock()
-	tcc.proc = proc
-}
+func (tcc *TxnCompilerContext) GetSubscriptionMeta(dbName string, snapshot *plan2.Snapshot) (*plan.SubscriptionMeta, error) {
+	start := time.Now()
+	defer func() {
+		v2.GetSubMetaDurationHistogram.Observe(time.Since(start).Seconds())
+	}()
 
-func (tcc *TxnCompilerContext) GetSubscriptionMeta(dbName string, snapshot plan2.Snapshot) (*plan.SubscriptionMeta, error) {
-	txnCtx, txn, err := tcc.GetTxnHandler().GetTxn()
-	if err != nil {
-		return nil, err
-	}
+	tempCtx := tcc.execCtx.reqCtx
+	txn := tcc.GetTxnHandler().GetTxn()
+	if plan2.IsSnapshotValid(snapshot) && snapshot.TS.Less(txn.Txn().SnapshotTS) {
+		txn = txn.CloneSnapshotOp(*snapshot.TS)
 
-	if snapshot.TS != nil {
-		if !snapshot.TS.Equal(timestamp.Timestamp{PhysicalTime: 0, LogicalTime: 0}) &&
-			snapshot.TS.Less(txn.Txn().SnapshotTS) {
-			txn = txn.CloneSnapshotOp(*snapshot.TS)
-
-			if snapshot.CreatedByTenant != nil {
-				txnCtx = context.WithValue(txnCtx, defines.TenantIDKey{}, snapshot.CreatedByTenant.TenantID)
-			}
+		if snapshot.Tenant != nil {
+			tempCtx = context.WithValue(tempCtx, defines.TenantIDKey{}, snapshot.Tenant.TenantID)
 		}
 	}
 
-	sub, err := getSubscriptionMeta(txnCtx, dbName, tcc.GetSession(), txn)
-	if err != nil {
-		return nil, err
-	}
-	return sub, nil
+	return getSubscriptionMeta(tempCtx, dbName, tcc.GetSession(), txn)
 }
 
 func (tcc *TxnCompilerContext) CheckSubscriptionValid(subName, accName, pubName string) error {
@@ -900,25 +1020,21 @@ func (tcc *TxnCompilerContext) IsPublishing(dbName string) (bool, error) {
 	return isDbPublishing(tcc.GetContext(), dbName, tcc.GetSession())
 }
 
+func (tcc *TxnCompilerContext) BuildTableDefByMoColumns(dbName, table string) (*plan.TableDef, error) {
+	return buildTableDefFromMoColumns(tcc.GetContext(), uint64(tcc.GetSession().GetAccountId()), dbName, table, tcc.GetSession())
+}
+
 // makeResultMetaPath gets query result meta path
 func makeResultMetaPath(accountName string, statementId string) string {
 	return fmt.Sprintf("query_result_meta/%s_%s.blk", accountName, statementId)
 }
 
-func (tcc *TxnCompilerContext) ResolveSnapshotWithSnapshotName(snapshotName string) (plan2.Snapshot, error) {
+func (tcc *TxnCompilerContext) ResolveSnapshotWithSnapshotName(snapshotName string) (*plan2.Snapshot, error) {
 	tenantCtx := tcc.GetContext()
-	if tcc.restoreInfo != nil {
-		tenantInfo := TenantInfo{
-			Tenant:        "xxx",
-			TenantID:      tcc.restoreInfo.TenantID,
-			User:          "internal",
-			UserID:        GetAdminUserId(),
-			DefaultRoleID: GetAccountAdminRoleId(),
-			DefaultRole:   GetAccountAdminRole(),
-		}
-		tenantCtx = defines.AttachAccount(tcc.GetContext(), tenantInfo.TenantID, tenantInfo.UserID, uint32(accountAdminRoleID))
+	if snapshot := tcc.GetSnapshot(); snapshot != nil && snapshot.GetTenant() != nil {
+		tenantCtx = defines.AttachAccount(tenantCtx, snapshot.Tenant.TenantID, GetAdminUserId(), GetAccountAdminRoleId())
 	}
-	return doResolveSnapshotTsWithSnapShotName(tenantCtx, tcc.GetSession(), snapshotName)
+	return doResolveSnapshotWithSnapshotName(tenantCtx, tcc.GetSession(), snapshotName)
 }
 
 func (tcc *TxnCompilerContext) CheckTimeStampValid(ts int64) (bool, error) {

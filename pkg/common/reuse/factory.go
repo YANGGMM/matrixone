@@ -17,12 +17,13 @@ package reuse
 import (
 	"fmt"
 	"sync/atomic"
+	"unsafe"
 
 	"github.com/matrixorigin/matrixone/pkg/common/mpool"
 )
 
 var (
-	pools = map[string]any{}
+	pools = map[unsafe.Pointer]any{}
 )
 
 var (
@@ -42,31 +43,31 @@ func use(spi SPI) {
 }
 
 // DefaultOptions default options
-func DefaultOptions[T ReusableObject]() *Options[T] {
-	return &Options[T]{}
+func DefaultOptions[T any, P ReusableObject[T]]() *Options[T, P] {
+	return &Options[T, P]{}
 }
 
 // WithReleaseFunc with specified release function. The release function is used to
 // release resources before gc.
-func (opts *Options[T]) WithReleaseFunc(release func(*T)) *Options[T] {
+func (opts *Options[T, P]) WithReleaseFunc(release func(P)) *Options[T, P] {
 	opts.release = release
 	return opts
 }
 
 // WithEnableChecker enable check double free, leak free.
-func (opts *Options[T]) WithEnableChecker() *Options[T] {
+func (opts *Options[T, P]) WithEnableChecker() *Options[T, P] {
 	opts.enableChecker = true
 	return opts
 }
 
-func (opts *Options[T]) withGCRecover(fn func()) *Options[T] {
+func (opts *Options[T, P]) withGCRecover(fn func()) *Options[T, P] {
 	opts.gcRecover = fn
 	return opts
 }
 
-func (opts *Options[T]) adjust() {
+func (opts *Options[T, P]) adjust() {
 	if opts.release == nil {
-		opts.release = func(*T) {}
+		opts.release = func(P) {}
 	}
 	if opts.memCapacity == 0 {
 		opts.memCapacity = mpool.MB
@@ -74,28 +75,28 @@ func (opts *Options[T]) adjust() {
 }
 
 // CreatePool create pool instance.
-func CreatePool[T ReusableObject](
-	new func() *T,
-	reset func(*T),
-	opts *Options[T]) {
-	var v T
-	if p := get(v); p != nil {
-		panic(fmt.Sprintf("%T pool already created", v))
+func CreatePool[T any, P ReusableObject[T]](
+	new func() P,
+	reset func(P),
+	opts *Options[T, P]) {
+	if p := get[T, P](); p != nil {
+		panic(fmt.Sprintf("%T pool already created", P(nil)))
 	}
 
+	tp := typeOf[T]()
 	switch defaultSPI {
 	case SyncBased:
-		pools[v.TypeName()] = newSyncPoolBased(new, reset, opts)
+		pools[tp] = newSyncPoolBased(new, reset, opts)
 	case MpoolBased:
-		pools[v.TypeName()] = newMpoolBased(mpool.MB*5, opts)
+		pools[tp] = newMpoolBased(mpool.MB*5, opts)
 	}
 }
 
 // Alloc allocates a pooled object.
-func Alloc[T ReusableObject](p Pool[T]) *T {
+func Alloc[T any, P ReusableObject[T]](p Pool[T, P]) P {
 	if p == nil {
 		var v T
-		p = get(v)
+		p = get[T, P]()
 		if p == nil {
 			panic(fmt.Sprintf("%T pool not created", v))
 		}
@@ -104,10 +105,9 @@ func Alloc[T ReusableObject](p Pool[T]) *T {
 }
 
 // Free free a pooled object.
-func Free[T ReusableObject](v *T, p Pool[T]) {
+func Free[T any, P ReusableObject[T]](v P, p Pool[T, P]) {
 	if p == nil {
-		var ev T
-		p = get(ev)
+		p = get[T, P]()
 	}
 	if p == nil {
 		panic(fmt.Sprintf("%T pool not created", v))
@@ -115,9 +115,20 @@ func Free[T ReusableObject](v *T, p Pool[T]) {
 	p.Free(v)
 }
 
-func get[T ReusableObject](v T) Pool[T] {
-	if pool, ok := pools[v.TypeName()]; ok {
-		return pool.(Pool[T])
+func get[T any, P ReusableObject[T]]() Pool[T, P] {
+	if pool, ok := pools[typeOf[T]()]; ok {
+		return pool.(Pool[T, P])
 	}
 	return nil
+}
+
+func typeOf[T any]() unsafe.Pointer {
+	var v *T
+	i := any(v)
+	// any is a fat point and reflect.Type is a *abi.Type
+	// type emptyInterface struct {
+	// 	typ  *abi.Type
+	// 	word unsafe.Pointer
+	// }
+	return *(*unsafe.Pointer)(unsafe.Pointer(&i))
 }

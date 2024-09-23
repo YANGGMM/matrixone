@@ -15,11 +15,13 @@
 package frontend
 
 import (
+	"context"
 	"testing"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/matrixorigin/matrixone/pkg/catalog"
 	plan3 "github.com/matrixorigin/matrixone/pkg/pb/plan"
 	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
 )
@@ -78,6 +80,8 @@ func Test_verifyAccountCanOperateClusterTable(t *testing.T) {
 }
 
 func Test_verifyLightPrivilege(t *testing.T) {
+	catalog.SetupDefines("")
+
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
@@ -222,4 +226,11 @@ func Test_hasMoCtrl(t *testing.T) {
 		},
 	})
 	assert.True(t, ret)
+}
+
+func newTestExecCtx(ctx context.Context, ctrl *gomock.Controller) *ExecCtx {
+	ret := &ExecCtx{
+		reqCtx: ctx,
+	}
+	return ret
 }

@@ -15,49 +15,42 @@
 package frontend
 
 import (
-	"context"
-
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 )
 
-func execInFrontendInBack(requestCtx context.Context,
-	backSes *backSession,
+func execInFrontendInBack(backSes *backSession,
 	execCtx *ExecCtx) (err error) {
+	execCtx.ses.EnterFPrint(FPExecInFrontEndInBack)
+	defer execCtx.ses.ExitFPrint(FPExecInFrontEndInBack)
 	//check transaction states
 	switch st := execCtx.stmt.(type) {
 	case *tree.BeginTransaction:
-		err = backSes.GetTxnHandler().TxnBegin()
-		if err != nil {
-			return
-		}
 	case *tree.CommitTransaction:
-		err = backSes.GetTxnHandler().TxnCommit()
-		if err != nil {
-			return
-		}
 	case *tree.RollbackTransaction:
-		err = backSes.GetTxnHandler().TxnRollback()
-		if err != nil {
-			return
-		}
 	case *tree.Use:
-		err = handleChangeDB(requestCtx, backSes, st.Name.Compare())
+		execCtx.ses.EnterFPrint(FPInBackUse)
+		defer execCtx.ses.ExitFPrint(FPInBackUse)
+		err = handleChangeDB(backSes, execCtx, st.Name.Compare())
 		if err != nil {
 			return
 		}
 	case *tree.CreateDatabase:
-		err = inputNameIsInvalid(execCtx.proc.Ctx, string(st.Name))
+		execCtx.ses.EnterFPrint(FPInBackCreateDatabase)
+		defer execCtx.ses.ExitFPrint(FPInBackCreateDatabase)
+		err = inputNameIsInvalid(execCtx.reqCtx, string(st.Name))
 		if err != nil {
 			return
 		}
 		if st.SubscriptionOption != nil && backSes.tenant != nil && !backSes.tenant.IsAdminRole() {
-			err = moerr.NewInternalError(execCtx.proc.Ctx, "only admin can create subscription")
+			err = moerr.NewInternalError(execCtx.reqCtx, "only admin can create subscription")
 			return
 		}
 		st.Sql = execCtx.sqlOfStmt
 	case *tree.DropDatabase:
-		err = inputNameIsInvalid(execCtx.proc.Ctx, string(st.Name))
+		execCtx.ses.EnterFPrint(FPInBackDropDatabase)
+		defer execCtx.ses.ExitFPrint(FPInBackDropDatabase)
+		err = inputNameIsInvalid(execCtx.reqCtx, string(st.Name))
 		if err != nil {
 			return
 		}
@@ -66,33 +59,37 @@ func execInFrontendInBack(requestCtx context.Context,
 			backSes.SetDatabaseName("")
 		}
 	case *tree.Grant:
+		execCtx.ses.EnterFPrint(FPInBackGrant)
+		defer execCtx.ses.ExitFPrint(FPInBackGrant)
 		switch st.Typ {
 		case tree.GrantTypeRole:
-			if err = handleGrantRole(requestCtx, backSes, &st.GrantRole); err != nil {
+			if err = handleGrantRole(backSes, execCtx, &st.GrantRole); err != nil {
 				return
 			}
 		case tree.GrantTypePrivilege:
-			if err = handleGrantPrivilege(requestCtx, backSes, &st.GrantPrivilege); err != nil {
+			if err = handleGrantPrivilege(backSes, execCtx, &st.GrantPrivilege); err != nil {
 				return
 			}
 		}
 	case *tree.Revoke:
+		execCtx.ses.EnterFPrint(FPInBackRevoke)
+		defer execCtx.ses.ExitFPrint(FPInBackRevoke)
 		switch st.Typ {
 		case tree.RevokeTypeRole:
-			if err = handleRevokeRole(requestCtx, backSes, &st.RevokeRole); err != nil {
+			if err = handleRevokeRole(backSes, execCtx, &st.RevokeRole); err != nil {
 				return
 			}
 		case tree.RevokeTypePrivilege:
-			if err = handleRevokePrivilege(requestCtx, backSes, &st.RevokePrivilege); err != nil {
+			if err = handleRevokePrivilege(backSes, execCtx, &st.RevokePrivilege); err != nil {
 				return
 			}
 		}
 	case *tree.EmptyStmt:
-		if err = handleEmptyStmt(requestCtx, backSes, st); err != nil {
+		if err = handleEmptyStmt(backSes, execCtx, st); err != nil {
 			return
 		}
 	default:
-		return moerr.NewInternalError(requestCtx, "backExec does not support %s", execCtx.sqlOfStmt)
+		return moerr.NewInternalErrorf(execCtx.reqCtx, "backExec does not support %s", execCtx.sqlOfStmt)
 	}
 	return
 }

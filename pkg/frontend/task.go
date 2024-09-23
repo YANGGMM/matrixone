@@ -26,7 +26,7 @@ import (
 func handlePauseDaemonTask(ctx context.Context, ses *Session, st *tree.PauseDaemonTask) error {
 	ts := getGlobalPu().TaskService
 	if ts == nil {
-		return moerr.NewInternalError(ses.requestCtx,
+		return moerr.NewInternalError(ctx,
 			"task service not ready yet, please try again later.")
 	}
 	tasks, err := ts.QueryDaemonTask(ctx,
@@ -43,7 +43,7 @@ func handlePauseDaemonTask(ctx context.Context, ses *Session, st *tree.PauseDaem
 	if tasks[0].TaskStatus == task.TaskStatus_Paused || tasks[0].TaskStatus == task.TaskStatus_PauseRequested {
 		return nil
 	} else if tasks[0].TaskStatus != task.TaskStatus_Running {
-		return moerr.NewInternalError(ctx,
+		return moerr.NewInternalErrorf(ctx,
 			"task can not be paused only if it is in %s statue, now it is %s",
 			task.TaskStatus_Running,
 			tasks[0].TaskStatus)
@@ -62,7 +62,7 @@ func handlePauseDaemonTask(ctx context.Context, ses *Session, st *tree.PauseDaem
 func handleCancelDaemonTask(ctx context.Context, ses *Session, taskID uint64) error {
 	ts := getGlobalPu().TaskService
 	if ts == nil {
-		return moerr.NewInternalError(ses.requestCtx,
+		return moerr.NewInternalError(ctx,
 			"task service not ready yet, please try again later.")
 	}
 	tasks, err := ts.QueryDaemonTask(ctx,
@@ -79,7 +79,7 @@ func handleCancelDaemonTask(ctx context.Context, ses *Session, taskID uint64) er
 	if tasks[0].TaskStatus == task.TaskStatus_Canceled || tasks[0].TaskStatus == task.TaskStatus_CancelRequested {
 		return nil
 	} else if tasks[0].TaskStatus == task.TaskStatus_Error {
-		return moerr.NewInternalError(ctx,
+		return moerr.NewInternalErrorf(ctx,
 			"task can not be canceled because it is in %s state", task.TaskStatus_Error)
 	}
 	tasks[0].TaskStatus = task.TaskStatus_CancelRequested
@@ -96,7 +96,7 @@ func handleCancelDaemonTask(ctx context.Context, ses *Session, taskID uint64) er
 func handleResumeDaemonTask(ctx context.Context, ses *Session, st *tree.ResumeDaemonTask) error {
 	ts := getGlobalPu().TaskService
 	if ts == nil {
-		return moerr.NewInternalError(ses.requestCtx,
+		return moerr.NewInternalError(ctx,
 			"task service not ready yet, please try again later.")
 	}
 	tasks, err := ts.QueryDaemonTask(ctx,
@@ -113,7 +113,7 @@ func handleResumeDaemonTask(ctx context.Context, ses *Session, st *tree.ResumeDa
 	if tasks[0].TaskStatus == task.TaskStatus_Running || tasks[0].TaskStatus == task.TaskStatus_ResumeRequested {
 		return nil
 	} else if tasks[0].TaskStatus != task.TaskStatus_Paused {
-		return moerr.NewInternalError(ctx,
+		return moerr.NewInternalErrorf(ctx,
 			"task can be resumed only if it is in %s state, now it is %s",
 			task.TaskStatus_Paused,
 			tasks[0].TaskStatus)

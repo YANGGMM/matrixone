@@ -66,3 +66,35 @@ func BenchmarkGetStrValue2(b *testing.B) {
 	}
 	_, _ = vv, nn
 }
+
+func TestPreExtendAndReset(t *testing.T) {
+	mp := mpool.MustNewZeroNoFixed()
+
+	wrapper := NewFunctionResultWrapper(types.T_bool.ToType(), mp)
+
+	result := MustFunctionResult[bool](wrapper)
+	require.NoError(t, wrapper.PreExtendAndReset(10))
+	require.Equal(t, 10, len(result.cols))
+	require.Equal(t, 10, result.vec.Length())
+
+	lastCapacity := result.vec.Capacity()
+	if lastCapacity > 20 {
+		require.NoError(t, wrapper.PreExtendAndReset(20))
+		require.Equal(t, 20, len(result.cols))
+		require.Equal(t, 20, result.vec.Length())
+		require.Equal(t, lastCapacity, result.vec.Capacity())
+	} else if lastCapacity > 11 {
+		nextLength := lastCapacity - 1
+		require.NoError(t, wrapper.PreExtendAndReset(nextLength))
+		require.Equal(t, nextLength, len(result.cols))
+		require.Equal(t, nextLength, result.vec.Length())
+		require.Equal(t, lastCapacity, result.vec.Capacity())
+	} else {
+		require.NoError(t, wrapper.PreExtendAndReset(20))
+		require.Equal(t, 20, len(result.cols))
+		require.Equal(t, 20, result.vec.Length())
+	}
+
+	wrapper.Free()
+	require.Equal(t, int64(0), mp.CurrNB())
+}

@@ -25,6 +25,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
+	"github.com/matrixorigin/matrixone/pkg/config"
 	"github.com/spkg/bom"
 )
 
@@ -34,8 +35,6 @@ var (
 	errUnexpectedQuoteField          = moerr.NewInvalidInputNoCtx("csvParser error: cannot have consecutive fields without separator")
 	BufferSizeScale                  = int64(5)
 	ReadBlockSize              int64 = 64 * 1024
-	// LargestEntryLimit is the max size for reading file to buf
-	LargestEntryLimit = 10 * 1024 * 1024
 )
 
 type Field struct {
@@ -504,7 +503,7 @@ func (parser *CSVParser) readUntil(chars *byteSet) ([]byte, byte, error) {
 	var buf []byte
 	for {
 		buf = append(buf, parser.buf...)
-		if len(buf) > LargestEntryLimit {
+		if len(buf) > config.LargestEntryLimit {
 			return buf, 0, moerr.NewInternalErrorNoCtx("size of row cannot exceed the max value of txn-entry-size-limit")
 		}
 		parser.buf = nil
@@ -795,20 +794,27 @@ func (parser *CSVParser) readBlock() error {
 		parser.isLastChunk = true
 		fallthrough
 	case err == nil:
-		// `parser.buf` reference to `appendBuf.Bytes`, so should use remainBuf to
-		// hold the `parser.buf` rest data to prevent slice overlap
-		parser.remainBuf.Reset()
-		parser.remainBuf.Write(parser.buf)
-		parser.appendBuf.Reset()
-		parser.appendBuf.Write(parser.remainBuf.Bytes())
+
 		blockData := parser.blockBuf[:n]
 		if parser.pos == 0 {
 			bomCleanedData := bom.Clean(blockData)
 			parser.pos += int64(n - len(bomCleanedData))
 			blockData = bomCleanedData
 		}
-		parser.appendBuf.Write(blockData)
-		parser.buf = parser.appendBuf.Bytes()
+		if len(parser.buf) == 0 {
+			// `parser.buf` reference to parser.blockBuf, avoid copy from parser.blockBuf to parser.appendBuf
+			parser.buf = blockData
+		} else {
+			// `parser.buf` reference to `appendBuf.Bytes`, so should use remainBuf to
+			// hold the `parser.buf` rest data to prevent slice overlap
+			parser.remainBuf.Reset()
+			parser.remainBuf.Write(parser.buf)
+			parser.appendBuf.Reset()
+			parser.appendBuf.Write(parser.remainBuf.Bytes())
+			parser.appendBuf.Write(blockData)
+			parser.buf = parser.appendBuf.Bytes()
+		}
+
 		return nil
 	default:
 		return err

@@ -22,17 +22,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/matrixorigin/matrixone/pkg/util/trace/impl/motrace/statistic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/matrixorigin/matrixone/pkg/util/trace/impl/motrace/statistic"
 )
 
 func TestAggregator(t *testing.T) {
 
-	var sessionId [16]byte
-	sessionId[0] = 1
-	var sessionId2 [16]byte
-	sessionId2[0] = 2
+	var sessionId = [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1}
+	var sessionId2 = [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x11}
 	const aggrWindow = 5 * time.Second
 
 	ctx := context.Background()
@@ -108,7 +107,7 @@ func TestAggregator(t *testing.T) {
 			RequestAt:     fixedTime.Add(-10 * time.Millisecond),
 			Duration:      10 * time.Millisecond,
 			TransactionID: _1TxnID,
-			StatementID:   _1TxnID,
+			StatementID:   _1StmtID,
 			Status:        StatementStatusSuccess,
 			ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
 			ConnType:      statistic.ConnTypeExternal,
@@ -130,7 +129,7 @@ func TestAggregator(t *testing.T) {
 			RequestAt:     fixedTime.Add(-10 * time.Millisecond),
 			Duration:      10 * time.Millisecond,
 			TransactionID: _1TxnID,
-			StatementID:   _1TxnID,
+			StatementID:   _1StmtID,
 			Status:        StatementStatusSuccess,
 			ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
 			ConnType:      statistic.ConnTypeExternal,
@@ -152,7 +151,7 @@ func TestAggregator(t *testing.T) {
 			RequestAt:     fixedTime.Add(6 * time.Second).Add(-10 * time.Millisecond),
 			Duration:      10 * time.Millisecond,
 			TransactionID: _1TxnID,
-			StatementID:   _1TxnID,
+			StatementID:   _1StmtID,
 			Status:        StatementStatusSuccess,
 			ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
 			ConnType:      statistic.ConnTypeExternal,
@@ -175,7 +174,7 @@ func TestAggregator(t *testing.T) {
 			RequestAt:     fixedTime.Add(6 * time.Second).Add(-10 * time.Millisecond),
 			Duration:      10 * time.Millisecond,
 			TransactionID: _1TxnID,
-			StatementID:   _1TxnID,
+			StatementID:   _1StmtID,
 			Status:        StatementStatusFailed,
 			ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
 			ConnType:      statistic.ConnTypeExternal,
@@ -235,7 +234,7 @@ func TestAggregator(t *testing.T) {
 			RequestAt:     fixedTime.Add(6 * time.Second).Add(-10 * time.Millisecond),
 			Duration:      time.Duration(10+i) * time.Millisecond,
 			TransactionID: _1TxnID,
-			StatementID:   _1TxnID,
+			StatementID:   _1StmtID,
 			Status:        StatementStatusFailed,
 			ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
 		})
@@ -255,7 +254,7 @@ func TestAggregator(t *testing.T) {
 			RequestAt:     fixedTime.Add(6 * time.Second).Add(-10 * time.Millisecond),
 			Duration:      time.Duration(10+i) * time.Millisecond,
 			TransactionID: _1TxnID,
-			StatementID:   _1TxnID,
+			StatementID:   _1StmtID,
 			Status:        StatementStatusFailed,
 			ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
 		})
@@ -289,7 +288,7 @@ func TestAggregator(t *testing.T) {
 		RequestAt:     fixedTime.Add(6 * time.Second).Add(-10 * time.Millisecond),
 		Duration:      203 * time.Millisecond,
 		TransactionID: _1TxnID,
-		StatementID:   _1TxnID,
+		StatementID:   _1StmtID,
 		Status:        StatementStatusFailed,
 		ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
 	})
@@ -303,10 +302,7 @@ func TestAggregatorWithStmtMerge(t *testing.T) {
 	c := GetTracerProvider()
 	c.enableStmtMerge = true
 
-	var sessionId [16]byte
-	sessionId[0] = 1
-	var sessionId2 [16]byte
-	sessionId2[0] = 2
+	var sessionId = [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1}
 	const aggrWindow = 5 * time.Second
 
 	ctx := context.Background()
@@ -334,7 +330,7 @@ func TestAggregatorWithStmtMerge(t *testing.T) {
 			Duration:      10 * time.Millisecond,
 			RowsRead:      1,
 			TransactionID: _1TxnID,
-			StatementID:   _1TxnID,
+			StatementID:   _1StmtID,
 			Status:        StatementStatusSuccess,
 			ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
 		})
@@ -361,7 +357,7 @@ func TestAggregatorWithStmtMerge(t *testing.T) {
 
 }
 
-func TestAggregator_MarkExported(t *testing.T) {
+func TestAggregator_DisableAgg(t *testing.T) {
 	type fields struct {
 		elems int
 	}
@@ -383,7 +379,7 @@ func TestAggregator_MarkExported(t *testing.T) {
 	const aggrWindow = 5 * time.Second
 
 	var err error
-	var sessionId = [16]byte{1}
+	var sessionId = [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1}
 	var ctx = context.TODO()
 	// Aggregate some Select
 	var fixedTime = time.Date(2023, time.June, 10, 12, 0, 1, 0, time.UTC)
@@ -413,7 +409,83 @@ func TestAggregator_MarkExported(t *testing.T) {
 					RequestAt:     fixedTime.Add(-10 * time.Millisecond),
 					Duration:      10 * time.Millisecond,
 					TransactionID: _1TxnID,
-					StatementID:   _1TxnID,
+					StatementID:   _1StmtID,
+					Status:        StatementStatusSuccess,
+					ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
+					/* ****************** */
+					// THE Key param.
+					disableAgg: true,
+					/* ****************** */
+				}
+				stmts = append(stmts, stmt)
+				_, err = aggregator.AddItem(stmt)
+				require.Equal(t, err, ErrFilteredOut)
+			}
+
+			// Get results from aggregator
+			// Check all records' exported value.
+			results := aggregator.GetResults()
+			require.Equal(t, 0, len(results))
+			for i := 1; i < tt.fields.elems; i++ {
+				require.Equal(t, false, stmts[i].exported)
+			}
+		})
+	}
+}
+
+func TestAggregator_MarkExported(t *testing.T) {
+	type fields struct {
+		elems int
+	}
+	tests := []struct {
+		name   string
+		fields fields
+		//want   []Item
+	}{
+		{
+			name:   "normal",
+			fields: fields{elems: 5},
+		},
+		{
+			name:   "normal_100",
+			fields: fields{elems: 100},
+		},
+	}
+
+	const aggrWindow = 5 * time.Second
+
+	var err error
+	var sessionId = [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1}
+	var ctx = context.TODO()
+	// Aggregate some Select
+	var fixedTime = time.Date(2023, time.June, 10, 12, 0, 1, 0, time.UTC)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+
+			aggregator := NewAggregator(
+				ctx,
+				aggrWindow,
+				StatementInfoNew,
+				StatementInfoUpdate,
+				StatementInfoFilter,
+			)
+
+			var stmts []*StatementInfo
+			for i := 0; i < tt.fields.elems; i++ {
+				stmt := &StatementInfo{
+					Account:       "MO",
+					User:          "moroot",
+					Database:      "system",
+					StatementType: "Select",
+					SqlSourceType: "external_sql",
+					SessionID:     sessionId,
+					Statement:     "SELECT 11",
+					ResponseAt:    fixedTime,
+					RequestAt:     fixedTime.Add(-10 * time.Millisecond),
+					Duration:      10 * time.Millisecond,
+					TransactionID: _1TxnID,
+					StatementID:   _1StmtID,
 					Status:        StatementStatusSuccess,
 					ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
 				}
@@ -434,4 +506,69 @@ func TestAggregator_MarkExported(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAggregator_PopResultsBeforeWindow(t *testing.T) {
+	c := GetTracerProvider()
+	c.enableStmtMerge = true
+
+	var sessionId = [16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x1}
+	const aggWindow = 5 * time.Second
+
+	ctx := context.Background()
+	aggregator := NewAggregator(
+		ctx,
+		aggWindow,
+		StatementInfoNew,
+		StatementInfoUpdate,
+		StatementInfoFilter,
+	)
+	var err error
+
+	//fixedTime := time.Date(2023, time.June, 10, 12, 0, 1, 0, time.UTC)
+	fixedTime := time.Now().Truncate(time.Second)
+	for i := 0; i < 2; i++ {
+		_, err = aggregator.AddItem(&StatementInfo{
+			Account:       "MO",
+			User:          "moroot",
+			Database:      "system",
+			StatementType: "Select",
+			SqlSourceType: "external_sql",
+			SessionID:     sessionId,
+			Statement:     "SELECT 11",
+			ResponseAt:    fixedTime,
+			RequestAt:     fixedTime.Add(-10 * time.Millisecond),
+			Duration:      10 * time.Millisecond,
+			RowsRead:      1,
+			TransactionID: _1TxnID,
+			StatementID:   _1StmtID,
+			Status:        StatementStatusSuccess,
+			ExecPlan:      NewDummySerializableExecPlan(map[string]string{"key": "val"}, dummySerializeExecPlan, uuid.UUID(_2TraceID)),
+		})
+		if err != nil {
+			t.Fatalf("Unexpected error when adding item: %v", err)
+		}
+	}
+
+	// Get results from aggregator, which in long ago window
+	results := aggregator.PopResultsBeforeWindow(time.Now().Add(-time.Hour).Truncate(aggWindow))
+	require.Equalf(t, 0, len(results), "Expected 0 aggregated statements: but got: %d", len(results))
+	require.Equalf(t, 1, len(aggregator.Grouped), "Expected 1 left in aggregator, but got: %d", len(aggregator.Grouped))
+
+	// Get results from aggregator
+	results = aggregator.PopResultsBeforeWindow(time.Now()) // ignore Truncate(aggWindow)
+	require.Equal(t, len(results), 1, "Expected 1 aggregated statements")
+	require.Equalf(t, 0, len(aggregator.Grouped), "Expected 0 left in aggregator, but got: %d", len(aggregator.Grouped))
+
+	assert.Equal(t, "SELECT 11;\nSELECT 11", results[0].(*StatementInfo).StmtBuilder.String())
+
+	res := "/* " + strconv.FormatInt(results[0].(*StatementInfo).AggrCount, 10) + " queries */ \n" + results[0].(*StatementInfo).StmtBuilder.String()
+
+	assert.Equal(t, "/* 2 queries */ \nSELECT 11;\nSELECT 11", res)
+
+	assert.Equal(t, int64(2), results[0].(*StatementInfo).RowsRead)
+
+	// Pop Again, expect empty result
+	results = aggregator.PopResultsBeforeWindow(time.Now())
+	require.Equal(t, len(results), 0, "Expected 0 aggregated statements")
 }

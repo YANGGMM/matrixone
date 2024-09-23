@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/matrixorigin/matrixone/pkg/catalog"
+	"github.com/matrixorigin/matrixone/pkg/cdc"
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/config"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
@@ -127,22 +128,21 @@ func createTablesInMoCatalog(ctx context.Context, txn executor.TxnExecutor, fina
 	addSqlIntoSet(initMoUserGrant4)
 	addSqlIntoSet(initMoUserGrant5)
 
-	//setp6: add new entries to the mo_mysql_compatibility_mode
+	//step6: add new entries to the mo_mysql_compatibility_mode
 	pu := config.GetParameterUnit(ctx)
-	for _, variable := range gSysVarsDefs {
-		if _, ok := configInitVariables[variable.Name]; ok {
-			addsql := addInitSystemVariablesSql(sysAccountID, sysAccountName, variable.Name, pu)
-			if len(addsql) != 0 {
-				addSqlIntoSet(addsql)
-			}
-		} else {
-			initMoMysqlCompatibilityMode := fmt.Sprintf(initMoMysqlCompatbilityModeWithoutDataBaseFormat, sysAccountID, sysAccountName, variable.Name, getVariableValue(variable.Default), true)
-			addSqlIntoSet(initMoMysqlCompatibilityMode)
-		}
+	addSqlIntoSet(addInitSystemVariablesSql(sysAccountID, sysAccountName, SaveQueryResult, pu))
+	addSqlIntoSet(addInitSystemVariablesSql(sysAccountID, sysAccountName, QueryResultMaxsize, pu))
+	addSqlIntoSet(addInitSystemVariablesSql(sysAccountID, sysAccountName, QueryResultTimeout, pu))
+
+	//step7: add entry into data key
+	sql, err := cdc.GetInitDataKeySql(pu.SV.KeyEncryptionKey)
+	if err != nil {
+		return err
 	}
+	addSqlIntoSet(sql)
 
 	//fill the mo_account, mo_role, mo_user, mo_role_privs, mo_user_grant, mo_mysql_compatibility_mode
-	for _, sql := range initDataSqls {
+	for _, sql = range initDataSqls {
 		res, err := txn.Exec(sql, executor.StatementOption{})
 		if err != nil {
 			return err
@@ -177,7 +177,7 @@ func checkSysExistsOrNotWithTxn(ctx context.Context, txn executor.TxnExecutor) (
 		res.ReadRows(func(rows int, cols []*vector.Vector) bool {
 			for i := 0; i < rows; i++ {
 				count += i
-				tableName := cols[0].GetStringAt(i)
+				tableName := cols[0].UnsafeGetStringAt(i)
 				// if there is at least one catalog table, it denotes the sys tenant exists.
 				if _, ok := sysWantedTables[tableName]; ok {
 					sysTenantExists = true
@@ -201,15 +201,15 @@ func checkSysExistsOrNotWithTxn(ctx context.Context, txn executor.TxnExecutor) (
 // GenSQLForInsertUpgradeAccountPrivilege generates SQL statements for inserting upgrade account permissions
 func GenSQLForInsertUpgradeAccountPrivilege() string {
 	entry := privilegeEntry{
-		privilegeId:       PrivilegeTypeUpgradeAccount,
-		privilegeLevel:    privilegeLevelStar,
-		objType:           objectTypeAccount,
-		objId:             objectIDAll,
-		withGrantOption:   false,
-		databaseName:      "",
-		tableName:         "",
-		privilegeEntryTyp: privilegeEntryTypeGeneral,
-		compound:          nil,
+		privilegeId:     PrivilegeTypeUpgradeAccount,
+		privilegeLevel:  privilegeLevelStar,
+		objType:         objectTypeAccount,
+		objId:           objectIDAll,
+		withGrantOption: false,
+		// databaseName:      "",
+		// tableName:         "",
+		// privilegeEntryTyp: privilegeEntryTypeGeneral,
+		// compound:          nil,
 	}
 	return fmt.Sprintf(initMoRolePrivFormat,
 		moAdminRoleID, moAdminRoleName,
@@ -222,15 +222,15 @@ func GenSQLForInsertUpgradeAccountPrivilege() string {
 // GenSQLForCheckUpgradeAccountPrivilegeExist generates an SQL statement to check for the existence of upgrade account permissions.
 func GenSQLForCheckUpgradeAccountPrivilegeExist() string {
 	entry := privilegeEntry{
-		privilegeId:       PrivilegeTypeUpgradeAccount,
-		privilegeLevel:    privilegeLevelStar,
-		objType:           objectTypeAccount,
-		objId:             objectIDAll,
-		withGrantOption:   false,
-		databaseName:      "",
-		tableName:         "",
-		privilegeEntryTyp: privilegeEntryTypeGeneral,
-		compound:          nil,
+		privilegeId:    PrivilegeTypeUpgradeAccount,
+		privilegeLevel: privilegeLevelStar,
+		objType:        objectTypeAccount,
+		objId:          objectIDAll,
+		// withGrantOption:   false,
+		// databaseName:      "",
+		// tableName:         "",
+		// privilegeEntryTyp: privilegeEntryTypeGeneral,
+		// compound:          nil,
 	}
 
 	sql := fmt.Sprintf("select * from mo_catalog.mo_role_privs where role_id = %d and obj_type = '%s' and obj_id = %d and privilege_id = %d and privilege_level = '%s'",

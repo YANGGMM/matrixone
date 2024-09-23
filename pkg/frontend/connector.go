@@ -21,10 +21,7 @@ import (
 	"strings"
 	"time"
 
-	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
-
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
-	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect"
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
@@ -50,7 +47,7 @@ func handleCreateDynamicTable(ctx context.Context, ses *Session, st *tree.Create
 		dbName = ses.GetDatabaseName()
 	}
 	tableName := string(st.Table.Name())
-	_, tableDef := ses.GetTxnCompileCtx().Resolve(dbName, tableName, plan2.Snapshot{TS: &timestamp.Timestamp{}})
+	_, tableDef := ses.GetTxnCompileCtx().Resolve(dbName, tableName, nil)
 	if tableDef == nil {
 		return moerr.NewNoSuchTable(ctx, dbName, tableName)
 	}
@@ -59,7 +56,7 @@ func handleCreateDynamicTable(ctx context.Context, ses *Session, st *tree.Create
 		switch opt := option.(type) {
 		case *tree.CreateSourceWithOption:
 			key := string(opt.Key)
-			val := opt.Val.(*tree.NumVal).OrigString()
+			val := opt.Val.(*tree.NumVal).String()
 			options[key] = val
 		}
 	}
@@ -88,7 +85,7 @@ func handleCreateDynamicTable(ctx context.Context, ses *Session, st *tree.Create
 	options[moconnector.OptConnectorSql] = tree.String(st.AsSource, dialect.MYSQL)
 	if err := createConnector(
 		ctx,
-		ses.GetTenantInfo().TenantID,
+		ses.GetTenantInfo().GetTenantID(),
 		ses.GetTenantName(),
 		ses.GetUserName(),
 		ts,
@@ -108,7 +105,7 @@ func handleCreateConnector(ctx context.Context, ses *Session, st *tree.CreateCon
 	}
 	dbName := string(st.TableName.Schema())
 	tableName := string(st.TableName.Name())
-	_, tableDef := ses.GetTxnCompileCtx().Resolve(dbName, tableName, plan2.Snapshot{TS: &timestamp.Timestamp{}})
+	_, tableDef := ses.GetTxnCompileCtx().Resolve(dbName, tableName, nil)
 	if tableDef == nil {
 		return moerr.NewNoSuchTable(ctx, dbName, tableName)
 	}
@@ -118,7 +115,7 @@ func handleCreateConnector(ctx context.Context, ses *Session, st *tree.CreateCon
 	}
 	if err := createConnector(
 		ctx,
-		ses.GetTenantInfo().TenantID,
+		ses.GetTenantInfo().GetTenantID(),
 		ses.GetTenantName(),
 		ses.GetUserName(),
 		ts,
@@ -229,7 +226,7 @@ func createConnector(
 	return nil
 }
 
-func handleDropConnector(_ context.Context, ses *Session, st *tree.DropConnector) error {
+func handleDropConnector(ctx context.Context, ses *Session, st *tree.DropConnector) error {
 	//todo: handle Create connector
 	return nil
 }
@@ -241,7 +238,7 @@ func handleDropDynamicTable(ctx context.Context, ses *Session, st *tree.DropTabl
 	ts := getGlobalPu().TaskService
 
 	// Query all relevant tasks belonging to the current tenant
-	tasks, err := ts.QueryDaemonTask(ses.GetRequestContext(),
+	tasks, err := ts.QueryDaemonTask(ctx,
 		taskservice.WithTaskType(taskservice.EQ, pb.TaskType_TypeKafkaSinkConnector.String()),
 		taskservice.WithAccountID(taskservice.EQ, ses.GetAccountId()),
 		taskservice.WithTaskStatusCond(pb.TaskStatus_Running, pb.TaskStatus_Created, pb.TaskStatus_Paused, pb.TaskStatus_PauseRequested),
@@ -269,9 +266,9 @@ func handleDropDynamicTable(ctx context.Context, ses *Session, st *tree.DropTabl
 	return nil
 }
 
-func handleShowConnectors(_ context.Context, ses *Session, isLastStmt bool) error {
+func handleShowConnectors(ctx context.Context, ses *Session) error {
 	var err error
-	if err := showConnectors(ses); err != nil {
+	if err := showConnectors(ctx, ses); err != nil {
 		return err
 	}
 	return err
@@ -352,13 +349,13 @@ var connectorCols = []Column{
 	},
 }
 
-func showConnectors(ses FeSession) error {
+func showConnectors(ctx context.Context, ses FeSession) error {
 	ts := getGlobalPu().TaskService
 	if ts == nil {
-		return moerr.NewInternalError(ses.GetRequestContext(),
+		return moerr.NewInternalError(ctx,
 			"task service not ready yet, please try again later.")
 	}
-	tasks, err := ts.QueryDaemonTask(ses.GetRequestContext(),
+	tasks, err := ts.QueryDaemonTask(ctx,
 		taskservice.WithTaskType(taskservice.EQ,
 			pb.TaskType_TypeKafkaSinkConnector.String()),
 		taskservice.WithAccountID(taskservice.EQ,
@@ -400,7 +397,7 @@ func showConnectors(ses FeSession) error {
 		row[11] = t.Details.Error
 		mrs.AddRow(row)
 	}
-	return nil
+	return trySaveQueryResult(ctx, ses.(*Session), mrs)
 }
 
 func optionString(options map[string]string) string {

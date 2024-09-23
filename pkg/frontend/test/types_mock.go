@@ -5,12 +5,15 @@
 package mock_frontend
 
 import (
+	"bytes"
 	context "context"
+	"github.com/matrixorigin/matrixone/pkg/sql/models"
 	reflect "reflect"
 
 	gomock "github.com/golang/mock/gomock"
 	batch "github.com/matrixorigin/matrixone/pkg/container/batch"
 	types "github.com/matrixorigin/matrixone/pkg/container/types"
+	plan "github.com/matrixorigin/matrixone/pkg/pb/plan"
 	tree "github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 	util "github.com/matrixorigin/matrixone/pkg/util"
 	process "github.com/matrixorigin/matrixone/pkg/vm/process"
@@ -90,18 +93,30 @@ func (mr *MockComputationWrapperMockRecorder) Clear() *gomock.Call {
 }
 
 // Compile mocks base method.
-func (m *MockComputationWrapper) Compile(requestCtx context.Context, fill func(*batch.Batch) error) (interface{}, error) {
+func (m *MockComputationWrapper) Compile(any any, fill func(*batch.Batch) error) (interface{}, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Compile", requestCtx, fill)
+	ret := m.ctrl.Call(m, "Compile", any, fill)
 	ret0, _ := ret[0].(interface{})
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // Compile indicates an expected call of Compile.
-func (mr *MockComputationWrapperMockRecorder) Compile(requestCtx, fill interface{}) *gomock.Call {
+func (mr *MockComputationWrapperMockRecorder) Compile(any, fill interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Compile", reflect.TypeOf((*MockComputationWrapper)(nil).Compile), requestCtx, fill)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Compile", reflect.TypeOf((*MockComputationWrapper)(nil).Compile), any, fill)
+}
+
+// Free mocks base method.
+func (m *MockComputationWrapper) Free() {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "Free")
+}
+
+// Free indicates an expected call of Free.
+func (mr *MockComputationWrapperMockRecorder) Free() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Free", reflect.TypeOf((*MockComputationWrapper)(nil).Free))
 }
 
 // GetAst mocks base method.
@@ -119,18 +134,18 @@ func (mr *MockComputationWrapperMockRecorder) GetAst() *gomock.Call {
 }
 
 // GetColumns mocks base method.
-func (m *MockComputationWrapper) GetColumns() ([]interface{}, error) {
+func (m *MockComputationWrapper) GetColumns(ctx context.Context) ([]interface{}, error) {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "GetColumns")
+	ret := m.ctrl.Call(m, "GetColumns", ctx)
 	ret0, _ := ret[0].([]interface{})
 	ret1, _ := ret[1].(error)
 	return ret0, ret1
 }
 
 // GetColumns indicates an expected call of GetColumns.
-func (mr *MockComputationWrapperMockRecorder) GetColumns() *gomock.Call {
+func (mr *MockComputationWrapperMockRecorder) GetColumns(ctx interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetColumns", reflect.TypeOf((*MockComputationWrapper)(nil).GetColumns))
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetColumns", reflect.TypeOf((*MockComputationWrapper)(nil).GetColumns), ctx)
 }
 
 // GetLoadTag mocks base method.
@@ -189,18 +204,70 @@ func (mr *MockComputationWrapperMockRecorder) GetUUID() *gomock.Call {
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GetUUID", reflect.TypeOf((*MockComputationWrapper)(nil).GetUUID))
 }
 
-// RecordExecPlan mocks base method.
-func (m *MockComputationWrapper) RecordExecPlan(ctx context.Context) error {
+// ParamVals mocks base method.
+func (m *MockComputationWrapper) ParamVals() []any {
 	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "RecordExecPlan", ctx)
+	ret := m.ctrl.Call(m, "ParamVals")
+	ret0, _ := ret[0].([]any)
+	return ret0
+}
+
+// ParamVals indicates an expected call of ParamVals.
+func (mr *MockComputationWrapperMockRecorder) ParamVals() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ParamVals", reflect.TypeOf((*MockComputationWrapper)(nil).ParamVals))
+}
+
+// Plan mocks base method.
+func (m *MockComputationWrapper) Plan() *plan.Plan {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "Plan")
+	ret0, _ := ret[0].(*plan.Plan)
+	return ret0
+}
+
+// Plan indicates an expected call of Plan.
+func (mr *MockComputationWrapperMockRecorder) Plan() *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Plan", reflect.TypeOf((*MockComputationWrapper)(nil).Plan))
+}
+
+// RecordExecPlan mocks base method.
+func (m *MockComputationWrapper) RecordExecPlan(ctx context.Context, phyPlan *models.PhyPlan) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "RecordExecPlan", ctx, phyPlan)
 	ret0, _ := ret[0].(error)
 	return ret0
 }
 
 // RecordExecPlan indicates an expected call of RecordExecPlan.
-func (mr *MockComputationWrapperMockRecorder) RecordExecPlan(ctx interface{}) *gomock.Call {
+func (mr *MockComputationWrapperMockRecorder) RecordExecPlan(ctx interface{}, phyPlan interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RecordExecPlan", reflect.TypeOf((*MockComputationWrapper)(nil).RecordExecPlan), ctx)
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "RecordExecPlan", reflect.TypeOf((*MockComputationWrapper)(nil).RecordExecPlan), ctx, phyPlan)
+}
+
+// SetExplainBuffer mocks base method.
+func (m *MockComputationWrapper) SetExplainBuffer(buf *bytes.Buffer) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "SetExplainBuffer", buf)
+}
+
+// SetExplainBuffer indicates an expected call of SetExplainBuffer.
+func (mr *MockComputationWrapperMockRecorder) SetExplainBuffer(buf interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "SetExplainBuffer", reflect.TypeOf((*MockComputationWrapper)(nil).SetExplainBuffer), buf)
+}
+
+// ResetPlanAndStmt mocks base method.
+func (m *MockComputationWrapper) ResetPlanAndStmt(stmt tree.Statement) {
+	m.ctrl.T.Helper()
+	m.ctrl.Call(m, "ResetPlanAndStmt", stmt)
+}
+
+// ResetPlanAndStmt indicates an expected call of ResetPlanAndStmt.
+func (mr *MockComputationWrapperMockRecorder) ResetPlanAndStmt(stmt interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ResetPlanAndStmt", reflect.TypeOf((*MockComputationWrapper)(nil).ResetPlanAndStmt), stmt)
 }
 
 // Run mocks base method.
@@ -325,6 +392,21 @@ func NewMockExecResult(ctrl *gomock.Controller) *MockExecResult {
 // EXPECT returns an object that allows the caller to indicate expected use.
 func (m *MockExecResult) EXPECT() *MockExecResultMockRecorder {
 	return m.recorder
+}
+
+// ColumnIsNull mocks base method.
+func (m *MockExecResult) ColumnIsNull(ctx context.Context, rindex, cindex uint64) (bool, error) {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ColumnIsNull", ctx, rindex, cindex)
+	ret0, _ := ret[0].(bool)
+	ret1, _ := ret[1].(error)
+	return ret0, ret1
+}
+
+// ColumnIsNull indicates an expected call of ColumnIsNull.
+func (mr *MockExecResultMockRecorder) ColumnIsNull(ctx, rindex, cindex interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ColumnIsNull", reflect.TypeOf((*MockExecResult)(nil).ColumnIsNull), ctx, rindex, cindex)
 }
 
 // GetInt64 mocks base method.
@@ -471,6 +553,20 @@ func (mr *MockBackgroundExecMockRecorder) Exec(arg0, arg1 interface{}) *gomock.C
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "Exec", reflect.TypeOf((*MockBackgroundExec)(nil).Exec), arg0, arg1)
 }
 
+// ExecRestore mocks base method.
+func (m *MockBackgroundExec) ExecRestore(arg0 context.Context, arg1 string, arg2, arg3 uint32) error {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "ExecRestore", arg0, arg1, arg2, arg3)
+	ret0, _ := ret[0].(error)
+	return ret0
+}
+
+// ExecRestore indicates an expected call of ExecRestore.
+func (mr *MockBackgroundExecMockRecorder) ExecRestore(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExecRestore", reflect.TypeOf((*MockBackgroundExec)(nil).ExecRestore), arg0, arg1, arg2, arg3)
+}
+
 // ExecStmt mocks base method.
 func (m *MockBackgroundExec) ExecStmt(arg0 context.Context, arg1 tree.Statement) error {
 	m.ctrl.T.Helper()
@@ -483,18 +579,6 @@ func (m *MockBackgroundExec) ExecStmt(arg0 context.Context, arg1 tree.Statement)
 func (mr *MockBackgroundExecMockRecorder) ExecStmt(arg0, arg1 interface{}) *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExecStmt", reflect.TypeOf((*MockBackgroundExec)(nil).ExecStmt), arg0, arg1)
-}
-
-func (m *MockBackgroundExec) ExecRestore(arg0 context.Context, arg1 string, arg2 uint32, arg3 uint32) error {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "ExecStmt", arg0, arg1, arg2, arg3)
-	ret0, _ := ret[0].(error)
-	return ret0
-}
-
-func (mr *MockBackgroundExecMockRecorder) ExecRestore(arg0, arg1, arg2, arg3 interface{}) *gomock.Call {
-	mr.mock.ctrl.T.Helper()
-	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "ExecStmt", reflect.TypeOf((*MockBackgroundExec)(nil).ExecStmt), arg0, arg1, arg2, arg3)
 }
 
 // GetExecResultBatches mocks base method.

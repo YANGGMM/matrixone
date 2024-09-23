@@ -17,44 +17,44 @@ package frontend
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"math"
 	"math/rand"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
+	"github.com/matrixorigin/matrixone/pkg/cdc"
 	"github.com/matrixorigin/matrixone/pkg/common/log"
-	moruntime "github.com/matrixorigin/matrixone/pkg/common/runtime"
-	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect"
-	db_holder "github.com/matrixorigin/matrixone/pkg/util/export/etl/db"
-	"github.com/matrixorigin/matrixone/pkg/util/trace"
-	"github.com/matrixorigin/matrixone/pkg/util/trace/impl/motrace"
-
-	"github.com/matrixorigin/matrixone/pkg/frontend/constant"
-
-	"github.com/matrixorigin/matrixone/pkg/container/batch"
-	"github.com/matrixorigin/matrixone/pkg/pb/plan"
-	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
-
-	"github.com/matrixorigin/matrixone/pkg/defines"
-
-	"github.com/BurntSushi/toml"
-
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
+	"github.com/matrixorigin/matrixone/pkg/common/mpool"
+	moruntime "github.com/matrixorigin/matrixone/pkg/common/runtime"
+	"github.com/matrixorigin/matrixone/pkg/common/util"
 	mo_config "github.com/matrixorigin/matrixone/pkg/config"
+	"github.com/matrixorigin/matrixone/pkg/container/batch"
+	"github.com/matrixorigin/matrixone/pkg/container/nulls"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
+	"github.com/matrixorigin/matrixone/pkg/defines"
+	"github.com/matrixorigin/matrixone/pkg/frontend/constant"
 	"github.com/matrixorigin/matrixone/pkg/logutil"
+	"github.com/matrixorigin/matrixone/pkg/pb/plan"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
+	"github.com/matrixorigin/matrixone/pkg/sql/parsers"
+	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine"
+	"github.com/matrixorigin/matrixone/pkg/vm/engine/memoryengine"
 )
 
 type CloseFlag struct {
@@ -100,6 +100,10 @@ func Max(a int, b int) int {
 	}
 }
 
+const (
+	invalidGoroutineId = math.MaxUint64
+)
+
 // GetRoutineId gets the routine id
 func GetRoutineId() uint64 {
 	data := make([]byte, 64)
@@ -107,6 +111,9 @@ func GetRoutineId() uint64 {
 	data = bytes.TrimPrefix(data, []byte("goroutine "))
 	data = data[:bytes.IndexByte(data, ' ')]
 	id, _ := strconv.ParseUint(string(data), 10, 64)
+	if id == 0 {
+		id = invalidGoroutineId
+	}
 	return id
 }
 
@@ -209,7 +216,7 @@ func getParameterUnit(configFile string, eng engine.Engine, txnClient TxnClient)
 	if err != nil {
 		return nil, err
 	}
-	logutil.Info("Using Dump Storage Engine and Cluster Nodes.")
+	sv.SetDefaultValues()
 	pu := mo_config.NewParameterUnit(sv, eng, txnClient, engine.Nodes{})
 
 	return pu, nil
@@ -262,7 +269,7 @@ func WildcardMatch(pattern, target string) bool {
 }
 
 // getExprValue executes the expression and returns the value.
-func getExprValue(e tree.Expr, ses *Session) (interface{}, error) {
+func getExprValue(e tree.Expr, ses *Session, execCtx *ExecCtx) (interface{}, error) {
 	/*
 		CORNER CASE:
 			SET character_set_results = utf8; // e = tree.UnresolvedName{'utf8'}.
@@ -272,7 +279,7 @@ func getExprValue(e tree.Expr, ses *Session) (interface{}, error) {
 	switch v := e.(type) {
 	case *tree.UnresolvedName:
 		// set @a = on, type of a is bool.
-		return v.Parts[0], nil
+		return v.ColName(), nil
 	}
 
 	var err error
@@ -302,22 +309,27 @@ func getExprValue(e tree.Expr, ses *Session) (interface{}, error) {
 	}
 
 	//2.run the select
-	ctx := ses.GetRequestContext()
 
 	//run the statement in the same session
 	ses.ClearResultBatches()
-	err = executeStmtInSameSession(ctx, ses, compositedSelect)
+	//!!!different ExecCtx
+	tempExecCtx := ExecCtx{
+		reqCtx: execCtx.reqCtx,
+		ses:    ses,
+	}
+	defer tempExecCtx.Close()
+	err = executeStmtInSameSession(tempExecCtx.reqCtx, ses, &tempExecCtx, compositedSelect)
 	if err != nil {
 		return nil, err
 	}
 
 	batches := ses.GetResultBatches()
 	if len(batches) == 0 {
-		return nil, moerr.NewInternalError(ctx, "the expr %s does not generate a value", e.String())
+		return nil, moerr.NewInternalErrorf(execCtx.reqCtx, "the expr %s does not generate a value", e.String())
 	}
 
 	if batches[0].VectorCount() > 1 {
-		return nil, moerr.NewInternalError(ctx, "the expr %s generates multi columns value", e.String())
+		return nil, moerr.NewInternalErrorf(execCtx.reqCtx, "the expr %s generates multi columns value", e.String())
 	}
 
 	//evaluate the count of rows, the count of columns
@@ -329,7 +341,7 @@ func getExprValue(e tree.Expr, ses *Session) (interface{}, error) {
 		}
 		count += b.RowCount()
 		if count > 1 {
-			return nil, moerr.NewInternalError(ctx, "the expr %s generates multi rows value", e.String())
+			return nil, moerr.NewInternalErrorf(execCtx.reqCtx, "the expr %s generates multi rows value", e.String())
 		}
 		if resultVec == nil && b.GetVector(0).Length() != 0 {
 			resultVec = b.GetVector(0)
@@ -337,7 +349,7 @@ func getExprValue(e tree.Expr, ses *Session) (interface{}, error) {
 	}
 
 	if resultVec == nil {
-		return nil, moerr.NewInternalError(ctx, "the expr %s does not generate a value", e.String())
+		return nil, moerr.NewInternalErrorf(execCtx.reqCtx, "the expr %s does not generate a value", e.String())
 	}
 
 	// for the decimal type, we need the type of expr
@@ -345,7 +357,7 @@ func getExprValue(e tree.Expr, ses *Session) (interface{}, error) {
 	var planExpr *plan.Expr
 	oid := resultVec.GetType().Oid
 	if oid == types.T_decimal64 || oid == types.T_decimal128 {
-		builder := plan2.NewQueryBuilder(plan.Query_SELECT, ses.GetTxnCompileCtx(), false)
+		builder := plan2.NewQueryBuilder(plan.Query_SELECT, ses.GetTxnCompileCtx(), false, false)
 		bindContext := plan2.NewBindContext(builder, nil)
 		binder := plan2.NewSetVarBinder(builder, bindContext)
 		planExpr, err = binder.BindExpr(e, 0, false)
@@ -354,17 +366,17 @@ func getExprValue(e tree.Expr, ses *Session) (interface{}, error) {
 		}
 	}
 
-	return getValueFromVector(resultVec, ses, planExpr)
+	return getValueFromVector(execCtx.reqCtx, resultVec, ses, planExpr)
 }
 
 // only support single value and unary minus
-func GetSimpleExprValue(e tree.Expr, ses *Session) (interface{}, error) {
+func GetSimpleExprValue(ctx context.Context, e tree.Expr, ses *Session) (interface{}, error) {
 	switch v := e.(type) {
 	case *tree.UnresolvedName:
 		// set @a = on, type of a is bool.
-		return v.Parts[0], nil
+		return v.ColName(), nil
 	default:
-		builder := plan2.NewQueryBuilder(plan.Query_SELECT, ses.GetTxnCompileCtx(), false)
+		builder := plan2.NewQueryBuilder(plan.Query_SELECT, ses.GetTxnCompileCtx(), false, false)
 		bindContext := plan2.NewBindContext(builder, nil)
 		binder := plan2.NewSetVarBinder(builder, bindContext)
 		planExpr, err := binder.BindExpr(e, 0, false)
@@ -373,83 +385,86 @@ func GetSimpleExprValue(e tree.Expr, ses *Session) (interface{}, error) {
 		}
 		// set @a = 'on', type of a is bool. And mo cast rule does not fit set variable rule so delay to convert type.
 		// Here the evalExpr may execute some function that needs engine.Engine.
-		ses.txnCompileCtx.GetProcess().Ctx = context.WithValue(ses.txnCompileCtx.GetProcess().Ctx, defines.EngineKey{}, ses.storage)
+		ses.txnCompileCtx.GetProcess().ReplaceTopCtx(
+			attachValue(ses.txnCompileCtx.GetProcess().GetTopContext(),
+				defines.EngineKey{},
+				ses.GetTxnHandler().GetStorage()))
 
 		vec, err := colexec.EvalExpressionOnce(ses.txnCompileCtx.GetProcess(), planExpr, []*batch.Batch{batch.EmptyForConstFoldBatch})
 		if err != nil {
 			return nil, err
 		}
 
-		value, err := getValueFromVector(vec, ses, planExpr)
+		value, err := getValueFromVector(ctx, vec, ses, planExpr)
 		vec.Free(ses.txnCompileCtx.GetProcess().Mp())
 		return value, err
 	}
 }
 
-func getValueFromVector(vec *vector.Vector, ses *Session, expr *plan2.Expr) (interface{}, error) {
+func getValueFromVector(ctx context.Context, vec *vector.Vector, ses *Session, expr *plan2.Expr) (interface{}, error) {
 	if vec.IsConstNull() || vec.GetNulls().Contains(0) {
 		return nil, nil
 	}
 	switch vec.GetType().Oid {
 	case types.T_bool:
-		return vector.MustFixedCol[bool](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[bool](vec)[0], nil
 	case types.T_bit:
-		return vector.MustFixedCol[uint64](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[uint64](vec)[0], nil
 	case types.T_int8:
-		return vector.MustFixedCol[int8](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[int8](vec)[0], nil
 	case types.T_int16:
-		return vector.MustFixedCol[int16](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[int16](vec)[0], nil
 	case types.T_int32:
-		return vector.MustFixedCol[int32](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[int32](vec)[0], nil
 	case types.T_int64:
-		return vector.MustFixedCol[int64](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[int64](vec)[0], nil
 	case types.T_uint8:
-		return vector.MustFixedCol[uint8](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[uint8](vec)[0], nil
 	case types.T_uint16:
-		return vector.MustFixedCol[uint16](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[uint16](vec)[0], nil
 	case types.T_uint32:
-		return vector.MustFixedCol[uint32](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[uint32](vec)[0], nil
 	case types.T_uint64:
-		return vector.MustFixedCol[uint64](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[uint64](vec)[0], nil
 	case types.T_float32:
-		return vector.MustFixedCol[float32](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[float32](vec)[0], nil
 	case types.T_float64:
-		return vector.MustFixedCol[float64](vec)[0], nil
-	case types.T_char, types.T_varchar, types.T_binary, types.T_varbinary, types.T_text, types.T_blob:
+		return vector.MustFixedColNoTypeCheck[float64](vec)[0], nil
+	case types.T_char, types.T_varchar, types.T_binary, types.T_varbinary, types.T_text, types.T_blob, types.T_datalink:
 		return vec.GetStringAt(0), nil
 	case types.T_array_float32:
 		return vector.GetArrayAt[float32](vec, 0), nil
 	case types.T_array_float64:
 		return vector.GetArrayAt[float64](vec, 0), nil
 	case types.T_decimal64:
-		val := vector.GetFixedAt[types.Decimal64](vec, 0)
+		val := vector.GetFixedAtNoTypeCheck[types.Decimal64](vec, 0)
 		return val.Format(expr.Typ.Scale), nil
 	case types.T_decimal128:
-		val := vector.GetFixedAt[types.Decimal128](vec, 0)
+		val := vector.GetFixedAtNoTypeCheck[types.Decimal128](vec, 0)
 		return val.Format(expr.Typ.Scale), nil
 	case types.T_json:
 		val := vec.GetBytesAt(0)
 		byteJson := types.DecodeJson(val)
 		return byteJson.String(), nil
 	case types.T_uuid:
-		val := vector.MustFixedCol[types.Uuid](vec)[0]
-		return val.ToString(), nil
+		val := vector.MustFixedColNoTypeCheck[types.Uuid](vec)[0]
+		return val.String(), nil
 	case types.T_date:
-		val := vector.MustFixedCol[types.Date](vec)[0]
+		val := vector.MustFixedColNoTypeCheck[types.Date](vec)[0]
 		return val.String(), nil
 	case types.T_time:
-		val := vector.MustFixedCol[types.Time](vec)[0]
+		val := vector.MustFixedColNoTypeCheck[types.Time](vec)[0]
 		return val.String(), nil
 	case types.T_datetime:
-		val := vector.MustFixedCol[types.Datetime](vec)[0]
+		val := vector.MustFixedColNoTypeCheck[types.Datetime](vec)[0]
 		return val.String(), nil
 	case types.T_timestamp:
-		val := vector.MustFixedCol[types.Timestamp](vec)[0]
+		val := vector.MustFixedColNoTypeCheck[types.Timestamp](vec)[0]
 		return val.String2(ses.GetTimeZone(), vec.GetType().Scale), nil
 	case types.T_enum:
-		return vector.MustFixedCol[types.Enum](vec)[0], nil
+		return vector.MustFixedColNoTypeCheck[types.Enum](vec)[0], nil
 	default:
-		return nil, moerr.NewInvalidArg(ses.GetRequestContext(), "variable type", vec.GetType().Oid.String())
+		return nil, moerr.NewInvalidArg(ctx, "variable type", vec.GetType().Oid.String())
 	}
 }
 
@@ -458,10 +473,6 @@ type statementStatus int
 const (
 	success statementStatus = iota
 	fail
-	sessionId = "session_id"
-
-	txnId       = "txn_id"
-	statementId = "statement_id"
 )
 
 func (s statementStatus) String() string {
@@ -477,11 +488,9 @@ func (s statementStatus) String() string {
 // logStatementStatus prints the status of the statement into the log.
 func logStatementStatus(ctx context.Context, ses FeSession, stmt tree.Statement, status statementStatus, err error) {
 	var stmtStr string
-	stm := motrace.StatementFromContext(ctx)
+	stm := ses.GetStmtInfo()
 	if stm == nil {
-		fmtCtx := tree.NewFmtCtx(dialect.MYSQL)
-		stmt.Format(fmtCtx)
-		stmtStr = fmtCtx.String()
+		stmtStr = ses.GetSqlOfStmt()
 	} else {
 		stmtStr = stm.Statement
 	}
@@ -490,95 +499,60 @@ func logStatementStatus(ctx context.Context, ses FeSession, stmt tree.Statement,
 
 func logStatementStringStatus(ctx context.Context, ses FeSession, stmtStr string, status statementStatus, err error) {
 	str := SubStringFromBegin(stmtStr, int(getGlobalPu().SV.LengthOfQueryPrinted))
-	outBytes, outPacket := ses.GetMysqlProtocol().CalculateOutTrafficBytes(true)
+	var outBytes, outPacket int64
+	switch resper := ses.GetResponser().(type) {
+	case *MysqlResp:
+		outBytes, outPacket = resper.mysqlRrWr.CalculateOutTrafficBytes(true)
+		if outBytes == 0 && outPacket == 0 {
+			ses.Warnf(ctx, "unexpected protocol closed")
+		}
+	default:
+
+	}
+
 	if status == success {
-		logDebug(ses, ses.GetDebugString(), "query trace status", logutil.ConnectionIdField(ses.GetConnectionID()), logutil.StatementField(str), logutil.StatusField(status.String()), trace.ContextField(ctx))
+		ses.Debug(ctx, "query trace status", logutil.StatementField(str), logutil.StatusField(status.String()))
 		err = nil // make sure: it is nil for EndStatement
 	} else {
-		logError(ses, ses.GetDebugString(), "query trace status", logutil.ConnectionIdField(ses.GetConnectionID()), logutil.StatementField(str), logutil.StatusField(status.String()), logutil.ErrorField(err), trace.ContextField(ctx))
+		ses.Error(
+			ctx,
+			"query trace status",
+			logutil.StatementField(str),
+			logutil.StatusField(status.String()),
+			logutil.ErrorField(err),
+			logutil.TxnInfoField(ses.GetStaticTxnInfo()),
+		)
 	}
 
 	// pls make sure: NO ONE use the ses.tStmt after EndStatement
 	if !ses.IsBackgroundSession() {
-		motrace.EndStatement(ctx, err, ses.SendRows(), outBytes, outPacket)
+		stmt := ses.GetStmtInfo()
+		stmt.EndStatement(ctx, err, ses.SendRows(), outBytes, outPacket)
 	}
-
 	// need just below EndStatement
 	ses.SetTStmt(nil)
 }
 
-var logger *log.MOLogger
-var loggerOnce sync.Once
-
-func getLogger() *log.MOLogger {
-	loggerOnce.Do(initLogger)
-	return logger
+func getLogger(sid string) *log.MOLogger {
+	return moruntime.GetLogger(sid)
 }
 
-func initLogger() {
-	rt := moruntime.ProcessLevelRuntime()
-	if rt == nil {
-		rt = moruntime.DefaultRuntime()
-	}
-	logger = rt.Logger().Named("frontend")
-}
-
+// appendSessionField append session id, transaction id and statement id to the fields
+// history:
+// #15877, discard ses.GetTxnInfo(), it need ses.Lock(). may cause deadlock: locked by itself.
+// #16028, depend on ses.GetStmtProfile() itself do the log. get rid of StatementInfo.
 func appendSessionField(fields []zap.Field, ses FeSession) []zap.Field {
 	if ses != nil {
-		if ses.GetStmtInfo() != nil {
-			fields = append(fields, zap.String(sessionId, uuid.UUID(ses.GetStmtInfo().SessionID).String()))
-			fields = append(fields, zap.String(statementId, uuid.UUID(ses.GetStmtInfo().StatementID).String()))
-			txnInfo := ses.GetTxnInfo()
-			if txnInfo != "" {
-				fields = append(fields, zap.String(txnId, txnInfo))
-			}
-		} else {
-			fields = append(fields, zap.String(sessionId, uuid.UUID(ses.GetUUID()).String()))
+		fields = append(fields, logutil.SessionIdField(uuid.UUID(ses.GetUUID()).String()))
+		p := ses.GetStmtProfile()
+		if p.GetStmtId() != dumpUUID {
+			fields = append(fields, logutil.StatementIdField(uuid.UUID(p.GetStmtId()).String()))
+		}
+		if txnId := p.GetTxnId(); txnId != dumpUUID {
+			fields = append(fields, logutil.TxnIdField(hex.EncodeToString(txnId[:])))
 		}
 	}
 	return fields
-}
-
-func logInfo(ses FeSession, info string, msg string, fields ...zap.Field) {
-	if ses != nil && ses.GetTenantInfo() != nil && ses.GetTenantInfo().User == db_holder.MOLoggerUser {
-		return
-	}
-	fields = append(fields, zap.String("session_info", info))
-	fields = appendSessionField(fields, ses)
-	getLogger().Log(msg, log.DefaultLogOptions().WithLevel(zap.InfoLevel).AddCallerSkip(1), fields...)
-}
-
-func logInfof(info string, msg string, fields ...zap.Field) {
-	if logutil.GetSkip1Logger().Core().Enabled(zap.InfoLevel) {
-		fields = append(fields, zap.String("session_info", info))
-		getLogger().Log(msg, log.DefaultLogOptions().WithLevel(zap.InfoLevel).AddCallerSkip(1), fields...)
-	}
-}
-
-func logDebug(ses FeSession, info string, msg string, fields ...zap.Field) {
-	if ses != nil && ses.GetTenantInfo() != nil && ses.GetTenantInfo().User == db_holder.MOLoggerUser {
-		return
-	}
-	fields = append(fields, zap.String("session_info", info))
-	fields = appendSessionField(fields, ses)
-	getLogger().Log(msg, log.DefaultLogOptions().WithLevel(zap.DebugLevel).AddCallerSkip(1), fields...)
-}
-
-func logError(ses FeSession, info string, msg string, fields ...zap.Field) {
-	if ses != nil && ses.GetTenantInfo() != nil && ses.GetTenantInfo().User == db_holder.MOLoggerUser {
-		return
-	}
-	fields = append(fields, zap.String("session_info", info))
-	fields = appendSessionField(fields, ses)
-	getLogger().Log(msg, log.DefaultLogOptions().WithLevel(zap.ErrorLevel).AddCallerSkip(1), fields...)
-}
-
-// todo: remove this function after all the logDebugf are replaced by logDebug
-func logDebugf(info string, msg string, fields ...interface{}) {
-	if logutil.GetSkip1Logger().Core().Enabled(zap.DebugLevel) {
-		fields = append(fields, info)
-		logutil.Debugf(msg+" %s", fields...)
-	}
 }
 
 // isCmdFieldListSql checks the sql is the cmdFieldListSql or not.
@@ -733,7 +707,7 @@ const (
 // execute.... // prepare stmt1 from .... ; set var1 = val1 ; set var2 = val2 ;
 // Format 2: COM_STMT_EXECUTE
 // execute.... // prepare stmt1 from .... ; param0 ; param1 ...
-func makeExecuteSql(ses *Session, stmt tree.Statement) string {
+func makeExecuteSql(ctx context.Context, ses *Session, stmt tree.Statement) string {
 	if ses == nil || stmt == nil {
 		return ""
 	}
@@ -743,7 +717,7 @@ func makeExecuteSql(ses *Session, stmt tree.Statement) string {
 	switch t := stmt.(type) {
 	case *tree.Execute:
 		name := string(t.Name)
-		prepareStmt, err := ses.GetPrepareStmt(name)
+		prepareStmt, err := ses.GetPrepareStmt(ctx, name)
 		if err != nil || prepareStmt == nil {
 			break
 		}
@@ -755,7 +729,7 @@ func makeExecuteSql(ses *Session, stmt tree.Statement) string {
 			//get SET VAR sql
 			setVarSqls := make([]string, len(t.Variables))
 			for i, v := range t.Variables {
-				_, userVal, err := ses.GetUserDefinedVar(v.Name)
+				userVal, err := ses.GetUserDefinedVar(v.Name)
 				if err == nil && userVal != nil && len(userVal.Sql) != 0 {
 					setVarSqls[i] = userVal.Sql
 				}
@@ -766,13 +740,13 @@ func makeExecuteSql(ses *Session, stmt tree.Statement) string {
 			//get value of parameters
 			paramCnt := prepareStmt.params.Length()
 			paramValues := make([]string, paramCnt)
-			vs := vector.MustFixedCol[types.Varlena](prepareStmt.params)
+			vs := vector.MustFixedColNoTypeCheck[types.Varlena](prepareStmt.params)
 			for i := 0; i < paramCnt; i++ {
 				isNull := prepareStmt.params.GetNulls().Contains(uint64(i))
 				if isNull {
 					paramValues[i] = "NULL"
 				} else {
-					paramValues[i] = vs[i].GetString(prepareStmt.params.GetArea())
+					paramValues[i] = vs[i].UnsafeGetString(prepareStmt.params.GetArea())
 				}
 			}
 			bb.WriteString(strings.Join(paramValues, " ; "))
@@ -783,60 +757,307 @@ func makeExecuteSql(ses *Session, stmt tree.Statement) string {
 	return bb.String()
 }
 
-func mysqlColDef2PlanResultColDef(mr *MysqlResultSet) *plan.ResultColDef {
-	if mr == nil {
-		return nil
+func convertRowsIntoBatch(pool *mpool.MPool, cols []Column, rows [][]any) (*batch.Batch, *plan.ResultColDef, error) {
+	planColDefs, colTyps, colNames, err := mysqlColDef2PlanResultColDef(cols)
+	if err != nil {
+		return nil, nil, err
+	}
+	//1. make vector type
+	bat := batch.New(true, colNames)
+	//2. make batch
+	cnt := len(rows)
+	bat.SetRowCount(cnt)
+	for colIdx, typ := range colTyps {
+		bat.Vecs[colIdx] = vector.NewVec(typ)
+		nsp := nulls.NewWithSize(cnt)
+
+		switch typ.Oid {
+		case types.T_varchar:
+			vData := make([]string, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				if val, ok := row[colIdx].(string); ok {
+					vData[rowIdx] = val
+				} else {
+					vData[rowIdx] = fmt.Sprintf("%v", row[colIdx])
+				}
+			}
+			if err = vector.AppendStringList(bat.Vecs[colIdx], vData, nil, pool); err != nil {
+				return nil, nil, err
+			}
+		case types.T_text:
+			vData := make([][]byte, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				if val, ok := row[colIdx].([]byte); ok {
+					vData[rowIdx] = val
+				} else {
+					vData[rowIdx] = ([]byte)(fmt.Sprintf("%v", row[colIdx]))
+				}
+			}
+			if err = vector.AppendBytesList(bat.Vecs[colIdx], vData, nil, pool); err != nil {
+				return nil, nil, err
+			}
+		case types.T_int8:
+			vData := make([]int8, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(int8)
+			}
+			err := vector.AppendFixedList[int8](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_int16:
+			vData := make([]int16, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(int16)
+			}
+			err := vector.AppendFixedList[int16](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_int32:
+			vData := make([]int32, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(int32)
+			}
+			err := vector.AppendFixedList[int32](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_int64:
+			vData := make([]int64, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(int64)
+			}
+			err := vector.AppendFixedList[int64](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_float64:
+			vData := make([]float64, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(float64)
+			}
+			err := vector.AppendFixedList[float64](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_float32:
+			vData := make([]float32, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(float32)
+			}
+			err := vector.AppendFixedList[float32](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_date:
+			vData := make([]types.Date, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(types.Date)
+			}
+			err := vector.AppendFixedList[types.Date](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_time:
+			vData := make([]types.Time, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(types.Time)
+			}
+			err := vector.AppendFixedList[types.Time](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_datetime:
+			vData := make([]types.Datetime, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(types.Datetime)
+			}
+			err := vector.AppendFixedList[types.Datetime](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_timestamp:
+			vData := make([]types.Timestamp, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				switch val := row[colIdx].(type) {
+				case types.Timestamp:
+					vData[rowIdx] = val
+				case string:
+					if vData[rowIdx], err = types.ParseTimestamp(time.Local, val, typ.Scale); err != nil {
+						return nil, nil, err
+					}
+				default:
+					return nil, nil, moerr.NewInternalErrorNoCtxf("%v can't convert to timestamp type", val)
+				}
+			}
+			err := vector.AppendFixedList[types.Timestamp](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		case types.T_enum:
+			vData := make([]types.Enum, cnt)
+			for rowIdx, row := range rows {
+				if row[colIdx] == nil {
+					nsp.Add(uint64(rowIdx))
+					continue
+				}
+				vData[rowIdx] = row[colIdx].(types.Enum)
+			}
+			err := vector.AppendFixedList[types.Enum](bat.Vecs[colIdx], vData, nil, pool)
+			if err != nil {
+				return nil, nil, err
+			}
+		default:
+			return nil, nil, moerr.NewInternalErrorNoCtxf("unsupported type %d", typ.Oid)
+		}
+
+		bat.Vecs[colIdx].SetNulls(nsp)
+	}
+	return bat, planColDefs, nil
+}
+
+func cleanBatch(pool *mpool.MPool, data ...*batch.Batch) {
+	for _, item := range data {
+		if item != nil {
+			item.Clean(pool)
+		}
+	}
+}
+
+func mysqlColDef2PlanResultColDef(cols []Column) (*plan.ResultColDef, []types.Type, []string, error) {
+	if len(cols) == 0 {
+		return nil, nil, nil, nil
 	}
 
-	resultCols := make([]*plan.ColDef, len(mr.Columns))
-	for i, col := range mr.Columns {
+	resultCols := make([]*plan.ColDef, len(cols))
+	resultColTypes := make([]types.Type, len(cols))
+	resultColNames := make([]string, len(cols))
+	for i, col := range cols {
+		resultColNames[i] = col.Name()
 		resultCols[i] = &plan.ColDef{
 			Name: col.Name(),
 		}
+		var pType plan.Type
+		var tType types.Type
 		switch col.ColumnType() {
-		case defines.MYSQL_TYPE_VAR_STRING:
-			resultCols[i].Typ = plan.Type{
+		case defines.MYSQL_TYPE_VAR_STRING, defines.MYSQL_TYPE_VARCHAR:
+			pType = plan.Type{
 				Id: int32(types.T_varchar),
 			}
+			tType = types.New(types.T_varchar, types.MaxVarcharLen, 0)
+		case defines.MYSQL_TYPE_TEXT:
+			pType = plan.Type{
+				Id: int32(types.T_text),
+			}
+			tType = types.New(types.T_text, types.MaxVarcharLen, 0)
+		case defines.MYSQL_TYPE_TINY:
+			pType = plan.Type{
+				Id: int32(types.T_int8),
+			}
+			tType = types.New(types.T_int8, 0, 0)
+		case defines.MYSQL_TYPE_SHORT:
+			pType = plan.Type{
+				Id: int32(types.T_int16),
+			}
+			tType = types.New(types.T_int16, 0, 0)
 		case defines.MYSQL_TYPE_LONG:
-			resultCols[i].Typ = plan.Type{
+			pType = plan.Type{
 				Id: int32(types.T_int32),
 			}
+			tType = types.New(types.T_int32, 0, 0)
 		case defines.MYSQL_TYPE_LONGLONG:
-			resultCols[i].Typ = plan.Type{
+			pType = plan.Type{
 				Id: int32(types.T_int64),
 			}
+			tType = types.New(types.T_int64, 0, 0)
 		case defines.MYSQL_TYPE_DOUBLE:
-			resultCols[i].Typ = plan.Type{
+			pType = plan.Type{
 				Id: int32(types.T_float64),
 			}
+			tType = types.New(types.T_float64, 0, 0)
 		case defines.MYSQL_TYPE_FLOAT:
-			resultCols[i].Typ = plan.Type{
+			pType = plan.Type{
 				Id: int32(types.T_float32),
 			}
+			tType = types.New(types.T_float32, 0, 0)
 		case defines.MYSQL_TYPE_DATE:
-			resultCols[i].Typ = plan.Type{
+			pType = plan.Type{
 				Id: int32(types.T_date),
 			}
+			tType = types.New(types.T_date, 0, 0)
 		case defines.MYSQL_TYPE_TIME:
-			resultCols[i].Typ = plan.Type{
+			pType = plan.Type{
 				Id: int32(types.T_time),
 			}
+			tType = types.New(types.T_time, 0, 0)
 		case defines.MYSQL_TYPE_DATETIME:
-			resultCols[i].Typ = plan.Type{
+			pType = plan.Type{
 				Id: int32(types.T_datetime),
 			}
+			tType = types.New(types.T_datetime, 0, 0)
 		case defines.MYSQL_TYPE_TIMESTAMP:
-			resultCols[i].Typ = plan.Type{
+			pType = plan.Type{
 				Id: int32(types.T_timestamp),
 			}
+			tType = types.New(types.T_timestamp, 0, 0)
 		default:
-			panic(fmt.Sprintf("unsupported mysql type %d", col.ColumnType()))
+			return nil, nil, nil, moerr.NewInternalErrorNoCtxf("unsupported mysql type %d", col.ColumnType())
 		}
+		resultCols[i].Typ = pType
+		resultColTypes[i] = tType
 	}
 	return &plan.ResultColDef{
 		ResultCols: resultCols,
-	}
+	}, resultColTypes, resultColNames, nil
 }
 
 // errCodeRollbackWholeTxn denotes that the error code
@@ -897,15 +1118,26 @@ func skipClientQuit(info string) bool {
 // if the stmt is not nil, we neglect the sql.
 type UserInput struct {
 	sql           string
+	hashedSql     string
 	stmt          tree.Statement
 	sqlSourceType []string
-	isRetstore    bool
-	fromAccount   uint32
-	toAccount     uint32
+	isRestore     bool
+	// operator account, the account executes restoration
+	// e.g. sys takes a snapshot sn1 for acc1, then restores acc1 from snapshot sn1. In this scenario, sys is the operator account
+	opAccount uint32
+	toAccount uint32
 }
 
 func (ui *UserInput) getSql() string {
 	return ui.sql
+}
+
+func (ui *UserInput) genHash() {
+	ui.hashedSql = hashString(ui.sql)
+}
+
+func (ui *UserInput) getHash() string {
+	return ui.hashedSql
 }
 
 // getStmt if the stmt is not nil, we neglect the sql.
@@ -936,12 +1168,12 @@ func (ui *UserInput) genSqlSourceType(ses FeSession) {
 		ui.sqlSourceType = append(ui.sqlSourceType, constant.InternalSql)
 		return
 	}
-	flag, _, _ := isSpecialUser(tenant.User)
+	flag, _, _ := isSpecialUser(tenant.GetUser())
 	if flag {
 		ui.sqlSourceType = append(ui.sqlSourceType, constant.InternalSql)
 		return
 	}
-	if tenant.Tenant == sysAccountName && tenant.User == "internal" {
+	if tenant.GetTenant() == sysAccountName && tenant.GetUser() == "internal" {
 		ui.sqlSourceType = append(ui.sqlSourceType, constant.InternalSql)
 		return
 	}
@@ -974,9 +1206,29 @@ func (ui *UserInput) getSqlSourceType(i int) string {
 	return sqlType
 }
 
+const (
+	issue3482SqlPrefix    = "load data local infile"
+	issue3482SqlPrefixLen = len(issue3482SqlPrefix)
+)
+
+// !!!NOTE!!! For debug
+// https://github.com/matrixorigin/MO-Cloud/issues/3482
+// TODO: remove it in the future
+func (ui *UserInput) isIssue3482Sql() bool {
+	if ui == nil {
+		return false
+	}
+	sql := ui.getSql()
+	sqlLen := len(sql)
+	if sqlLen <= issue3482SqlPrefixLen {
+		return false
+	}
+	return strings.HasPrefix(strings.ToLower(sql), issue3482SqlPrefix)
+}
+
 func unboxExprStr(ctx context.Context, expr tree.Expr) (string, error) {
 	if e, ok := expr.(*tree.NumVal); ok && e.ValType == tree.P_char {
-		return e.OrigString(), nil
+		return e.String(), nil
 	}
 	return "", moerr.NewInternalError(ctx, "invalid expr type")
 }
@@ -994,11 +1246,11 @@ func (b *strParamBinder) bind(e tree.Expr) string {
 
 	switch val := e.(type) {
 	case *tree.NumVal:
-		return val.OrigString()
+		return val.String()
 	case *tree.ParamExpr:
 		return b.params.GetStringAt(val.Offset - 1)
 	default:
-		b.err = moerr.NewInternalError(b.ctx, "invalid params type %T", e)
+		b.err = moerr.NewInternalErrorf(b.ctx, "invalid params type %T", e)
 		return ""
 	}
 }
@@ -1015,4 +1267,520 @@ func (b *strParamBinder) bindIdentStr(ident *tree.AccountIdentified) string {
 	default:
 		return ""
 	}
+}
+
+func resetBits(t *uint32, val uint32) {
+	if t == nil {
+		return
+	}
+	*t = val
+}
+
+func setBits(t *uint32, bit uint32) {
+	if t == nil {
+		return
+	}
+	*t |= bit
+}
+
+func clearBits(t *uint32, bit uint32) {
+	if t == nil {
+		return
+	}
+	*t &= ^bit
+}
+
+func bitsIsSet(t uint32, bit uint32) bool {
+	return t&bit != 0
+}
+
+func attachValue(ctx context.Context, key, val any) context.Context {
+	if ctx == nil {
+		panic("context is nil")
+	}
+
+	return context.WithValue(ctx, key, val)
+}
+
+func updateTempEngine(storage engine.Engine, te *memoryengine.Engine) {
+	if ee, ok := storage.(*engine.EntireEngine); ok && ee != nil {
+		ee.TempEngine = te
+	}
+}
+
+const KeySep = "#"
+
+func genKey(dbName, tblName string) string {
+	return fmt.Sprintf("%s%s%s", dbName, KeySep, tblName)
+}
+
+func splitKey(key string) (string, string) {
+	parts := strings.Split(key, KeySep)
+	if len(parts) >= 2 {
+		return parts[0], parts[1]
+	}
+	return parts[0], ""
+}
+
+type toposort struct {
+	next map[string][]string
+}
+
+func (g *toposort) addVertex(v string) {
+	if _, ok := g.next[v]; ok {
+		return
+	}
+	g.next[v] = make([]string, 0)
+}
+
+func (g *toposort) addEdge(from, to string) {
+	if _, ok := g.next[from]; !ok {
+		g.next[from] = make([]string, 0)
+	}
+	g.next[from] = append(g.next[from], to)
+}
+
+func (g *toposort) sort() (ans []string, err error) {
+	inDegree := make(map[string]uint)
+	for u := range g.next {
+		inDegree[u] = 0
+	}
+	for _, nextVertices := range g.next {
+		for _, v := range nextVertices {
+			inDegree[v] += 1
+		}
+	}
+
+	var noPreVertices []string
+	for v, deg := range inDegree {
+		if deg == 0 {
+			noPreVertices = append(noPreVertices, v)
+		}
+	}
+
+	for len(noPreVertices) > 0 {
+		// find vertex whose inDegree = 0
+		v := noPreVertices[0]
+		noPreVertices = noPreVertices[1:]
+		ans = append(ans, v)
+
+		// update the next vertices from v
+		for _, to := range g.next[v] {
+			inDegree[to] -= 1
+			if inDegree[to] == 0 {
+				noPreVertices = append(noPreVertices, to)
+			}
+		}
+	}
+
+	if len(ans) != len(inDegree) {
+		err = moerr.NewInternalErrorNoCtx("There is a cycle in dependency graph")
+	}
+	return
+}
+
+func setFPrints(txnOp TxnOperator, fprints footPrints) {
+	if txnOp != nil {
+		txnOp.SetFootPrints(fprints.prints[:])
+	}
+}
+
+type footPrints struct {
+	prints [256][2]uint32
+}
+
+func (fprints *footPrints) reset() {
+	for i := 0; i < len(fprints.prints); i++ {
+		fprints.prints[i][0] = 0
+		fprints.prints[i][1] = 0
+	}
+}
+
+func (fprints *footPrints) String() string {
+	strBuf := strings.Builder{}
+	for i := 0; i < len(fprints.prints); i++ {
+		if fprints.prints[i][0] == 0 && fprints.prints[i][1] == 0 {
+			continue
+		}
+		strBuf.WriteString("[")
+		strBuf.WriteString(fmt.Sprintf("%d", i))
+		strBuf.WriteString(": ")
+		strBuf.WriteString(fmt.Sprintf("enter:%d exit:%d", fprints.prints[i][0], fprints.prints[i][1]))
+		strBuf.WriteString("] ")
+	}
+	return strBuf.String()
+}
+
+func (fprints *footPrints) addEnter(idx int) {
+	if idx >= 0 && idx < len(fprints.prints) {
+		fprints.prints[idx][0]++
+	}
+}
+
+func (fprints *footPrints) addExit(idx int) {
+	if idx >= 0 && idx < len(fprints.prints) {
+		fprints.prints[idx][1]++
+	}
+}
+
+func ToRequest(payload []byte) *Request {
+	req := &Request{
+		cmd:  CommandType(payload[0]),
+		data: payload[1:],
+	}
+
+	return req
+}
+
+// CancelCheck checks if the given context has been canceled.
+// If the context is canceled, it returns the context's error.
+func CancelCheck(Ctx context.Context) error {
+	select {
+	case <-Ctx.Done():
+		return Ctx.Err()
+	default:
+		return nil
+	}
+}
+
+func checkMoreResultSet(status uint16, isLastStmt bool) uint16 {
+	if !isLastStmt {
+		status |= SERVER_MORE_RESULTS_EXISTS
+	}
+	return status
+}
+
+func Copy[T any](src []T) []T {
+	if src == nil {
+		return nil
+	}
+	if len(src) == 0 {
+		return []T{}
+	}
+	dst := make([]T, len(src))
+	copy(dst, src)
+	return dst
+}
+
+func hashString(s string) string {
+	hash := sha256.New()
+	hash.Write(util.UnsafeStringToBytes(s))
+	hashBytes := hash.Sum(nil)
+	return hex.EncodeToString(hashBytes)
+}
+
+func colDef2MysqlColumn(ctx context.Context, col *plan.ColDef) (*MysqlColumn, error) {
+	var err error
+	c := new(MysqlColumn)
+	c.SetName(col.Name)
+	c.SetOrgName(col.GetOriginCaseName())
+	c.SetTable(col.TblName)
+	c.SetOrgTable(col.TblName)
+	c.SetAutoIncr(col.Typ.AutoIncr)
+	c.SetSchema(col.DbName)
+	err = convertEngineTypeToMysqlType(ctx, types.T(col.Typ.Id), c)
+	if err != nil {
+		return nil, err
+	}
+	setColFlag(c)
+	setColLength(c, col.Typ.Width)
+	setCharacter(c)
+
+	// For binary/varbinary with mysql_type_varchar.Change the charset.
+	if types.T(col.Typ.Id) == types.T_binary || types.T(col.Typ.Id) == types.T_varbinary {
+		c.SetCharset(0x3f)
+	}
+
+	c.SetDecimal(col.Typ.Scale)
+	convertMysqlTextTypeToBlobType(c)
+	return c, nil
+}
+
+// isLegal checks if the sqls are legal parsed by the mo parser.
+// if there is at least one sql can be parsed, it returns true
+func isLegal(name string, sqls []string) bool {
+	name = strings.TrimSpace(name)
+	if len(name) == 0 || len(sqls) == 0 {
+		return false
+	}
+	for _, sql := range sqls {
+		if len(sql) == 0 {
+			return false
+		}
+	}
+	yes := false
+	for _, sql := range sqls {
+		_, err := parsers.ParseOne(context.Background(), dialect.MYSQL, sql, 1)
+		if err != nil {
+			continue
+		}
+		yes = true
+		break
+	}
+	return yes
+}
+
+// hasSpecialChars checks the string have special characters (','  '.'  ':' '`')
+func hasSpecialChars(s string) bool {
+	return strings.ContainsAny(s, ",.:`")
+}
+
+/*
+accountNameIsLegal checks the account name legal or not.
+rule:
+
+	if create account name or create account `name` can succeed,
+	it is legal.
+
+	it means all most all string can be legal.
+*/
+func accountNameIsLegal(name string) bool {
+	if hasSpecialChars(name) {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	createAccountSqls := []string{
+		"create account " + name + " ADMIN_NAME 'admin' IDENTIFIED BY '111'",
+		"create account `" + name + "` ADMIN_NAME 'admin' IDENTIFIED BY '111'",
+	}
+	return isLegal(name, createAccountSqls)
+}
+
+/*
+dbNameIsLegal checks the database name legal or not.
+rule:
+
+	if create database name or create database `name` can succeed,
+	it is legal.
+
+	it means all most all string can be legal.
+*/
+func dbNameIsLegal(name string) bool {
+	if hasSpecialChars(name) {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	createDBSqls := []string{
+		"create database " + name,
+		"create database `" + name + "`",
+	}
+	return isLegal(name, createDBSqls)
+}
+
+/*
+tableNameIsLegal checks the table name legal or not.
+rule:
+
+	if create table name or create table `name` can succeed,
+	it is legal.
+
+	it means all most all string can be legal.
+*/
+func tableNameIsLegal(name string) bool {
+	if hasSpecialChars(name) {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	createTableSqls := []string{
+		"create table " + name + "(a int)",
+		"create table `" + name + "`(a int)",
+	}
+	return isLegal(name, createTableSqls)
+}
+
+//func tableNameIsRegexpr(s string) bool {
+//	if len(s) < 2 {
+//		return false
+//	}
+//	if strings.HasPrefix(s, "/") && strings.HasSuffix(s, "/") {
+//		_, err := regexp.Compile(s)
+//		if err != nil {
+//			return false
+//		}
+//		return true
+//	}
+//	return false
+//}
+
+// compositedUriInfo uri according to the format: mysql://root:111@127.0.0.1:6001
+// if valid, return true and extracted info
+// !!!NOTE!!!
+// user and password does not have the special character ( ':' '@' )
+func compositedUriInfo(uri string, uriPrefix string) (bool, cdc.UriInfo) {
+	if !uriHasPrefix(uri, uriPrefix) {
+		return false, cdc.UriInfo{}
+	}
+	//locate user password
+	rest := uri[len(uriPrefix):]
+	seps := strings.Split(rest, "@")
+	if len(seps) != 2 || len(seps[0]) == 0 || len(seps[1]) == 0 {
+		return false, cdc.UriInfo{}
+	}
+	seps2 := strings.Split(seps[0], ":")
+	if len(seps2) < 2 {
+		return false, cdc.UriInfo{}
+	}
+	userName := strings.Join(seps2[0:len(seps2)-1], ":")
+	password := seps2[len(seps2)-1]
+	passwordStart := len(uriPrefix) + len(userName) + 1
+	passwordEnd := passwordStart + len(password)
+	if passwordEnd > len(uri) || password != uri[passwordStart:passwordEnd] {
+		return false, cdc.UriInfo{}
+	}
+
+	sep3 := strings.Split(seps[1], ":")
+	if len(sep3) != 2 || len(sep3[0]) == 0 || len(sep3[1]) == 0 {
+		return false, cdc.UriInfo{}
+	}
+	ip := sep3[0]
+	port := sep3[1]
+	portInt32, err := strconv.ParseUint(port, 10, 32)
+	if err != nil || portInt32 > 65535 {
+		return false, cdc.UriInfo{}
+	}
+	return true, cdc.UriInfo{
+		User:          userName,
+		Password:      password,
+		Ip:            ip,
+		Port:          int(portInt32),
+		PasswordStart: passwordStart,
+		PasswordEnd:   passwordEnd,
+	}
+}
+
+// replaceStr replaces s[start:end] by s2
+func replaceStr(s string, start, end int, s2 string) string {
+	if start >= end || start < 0 || end < 0 {
+		return s
+	}
+	if end <= len(s) {
+		return s[:start] + s2 + s[end:]
+	}
+	return s
+}
+
+// uriHasPrefix
+func uriHasPrefix(uri string, prefix string) bool {
+	if len(uri) < len(prefix) || strings.ToLower(uri[:len(prefix)]) != prefix {
+		return false
+	}
+	return true
+}
+
+/*
+extractUriInfo extracts the uriInfo
+return serialized uriInfo
+*/
+func extractUriInfo(ctx context.Context, uri string, uriPrefix string) (string, cdc.UriInfo, error) {
+	ok, uriInfo := compositedUriInfo(uri, uriPrefix)
+	if !ok {
+		return "", cdc.UriInfo{}, moerr.NewInternalError(ctx, "source uri is invalid format")
+	}
+
+	jsonUriInfo, err := cdc.JsonEncode(&uriInfo)
+	if err != nil {
+		return "", cdc.UriInfo{}, err
+	}
+	return jsonUriInfo, uriInfo, nil
+}
+
+func buildTableDefFromMoColumns(ctx context.Context, accountId uint64, dbName, table string, ses FeSession) (*plan.TableDef, error) {
+	bh := ses.GetShareTxnBackgroundExec(ctx, false)
+	defer bh.Close()
+	var (
+		sql     string
+		erArray []ExecResult
+		err     error
+	)
+
+	sql, err = getTableColumnDefSql(accountId, dbName, table)
+	if err != nil {
+		return nil, err
+	}
+
+	bh.ClearExecResultSet()
+	err = bh.Exec(ctx, sql)
+	if err != nil {
+		return nil, err
+	}
+
+	erArray, err = getResultSet(ctx, bh)
+	if err != nil {
+		return nil, err
+	}
+	if !execResultArrayHasData(erArray) {
+		return nil, moerr.NewNoSuchTable(ctx, dbName, table)
+	}
+
+	cols, err := extractTableDefColumns(erArray, ctx, dbName, table)
+	if err != nil {
+		return nil, err
+	}
+
+	return &plan.TableDef{
+		Name:   table,
+		DbName: dbName,
+		Cols:   cols,
+	}, nil
+}
+
+func extractTableDefColumns(erArray []ExecResult, ctx context.Context, dbName, table string) ([]*plan.ColDef, error) {
+	cols := make([]*plan.ColDef, 0)
+	for _, result := range erArray {
+		for i := uint64(0); i < result.GetRowCount(); i++ {
+			colName, err := result.GetString(ctx, i, 0)
+			if err != nil {
+				return nil, err
+			}
+
+			colType, err := result.GetString(ctx, i, 1)
+			if err != nil {
+				return nil, err
+			}
+
+			typ := new(types.Type)
+			err = typ.Unmarshal([]byte(colType))
+			if err != nil {
+				return nil, err
+			}
+
+			colNum, err := result.GetUint64(ctx, i, 2)
+			if err != nil {
+				return nil, err
+			}
+
+			attDefault, err := result.GetString(ctx, i, 4)
+			if err != nil {
+				return nil, err
+			}
+			def := new(plan.Default)
+			err = types.Decode([]byte(attDefault), def)
+			if err != nil {
+				return nil, err
+			}
+
+			isHidden, err := result.GetInt64(ctx, i, 6)
+			if err != nil {
+				return nil, err
+			}
+
+			cols = append(cols, &plan.ColDef{
+				TblName:    table,
+				DbName:     dbName,
+				ColId:      colNum,
+				Name:       strings.ToLower(colName),
+				OriginName: colName,
+				Hidden:     isHidden == 1,
+				Typ: plan.Type{
+					Id:          int32(typ.Oid),
+					Width:       typ.Width,
+					Scale:       typ.Scale,
+					Table:       table,
+					NotNullable: !def.NullAbility,
+				},
+				Default: def,
+			})
+		}
+	}
+	return cols, nil
 }

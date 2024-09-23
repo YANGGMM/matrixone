@@ -85,6 +85,9 @@ type UpdateExpr struct {
 }
 
 func (node *UpdateExpr) Format(ctx *FmtCtx) {
+	if node == nil {
+		return
+	}
 	prefix := ""
 	for _, n := range node.Names {
 		ctx.WriteString(prefix)
@@ -134,6 +137,7 @@ const (
 )
 
 const (
+	INFILE = 0
 	S3     = 1
 	INLINE = 2
 )
@@ -146,9 +150,9 @@ type ExternParam struct {
 }
 
 type ExParamConst struct {
-	Init         bool
 	ScanType     int
 	FileSize     int64
+	FileStartOff int64
 	Filepath     string
 	CompressType string
 	Format       string
@@ -159,16 +163,15 @@ type ExParamConst struct {
 }
 
 type ExParam struct {
+	ExternType  int32
 	JsonData    string
 	FileService fileservice.FileService
 	NullMap     map[string]([]string)
 	S3Param     *S3Parameter
 	Ctx         context.Context
-	LoadFile    bool
 	Local       bool
-	QueryResult bool
-	SysTable    bool
 	Parallel    bool
+	Strict      bool
 }
 
 type S3Parameter struct {
@@ -294,6 +297,12 @@ func (node *Load) Format(ctx *FmtCtx) {
 	if node.Param.Tail.Assignments != nil {
 		ctx.WriteString(" set ")
 		node.Param.Tail.Assignments.Format(ctx)
+	}
+	if node.Param.Parallel {
+		ctx.WriteString(" parallel true ")
+		if node.Param.Strict {
+			ctx.WriteString("strict true ")
+		}
 	}
 }
 

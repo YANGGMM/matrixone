@@ -21,6 +21,8 @@ import (
 	"sort"
 	"strconv"
 
+	"github.com/matrixorigin/matrixone/pkg/vm/message"
+
 	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
@@ -140,13 +142,22 @@ func (ndesc *NodeDescribeImpl) GetNodeBasicInfo(ctx context.Context, options *Ex
 		pname = "Fuzzy Filter for duplicate key"
 	case plan.Node_LOCK_OP:
 		pname = "Lock"
+	case plan.Node_APPLY:
+		pname = "CROSS APPLY"
+	//case plan.Node_MULTI_UPDATE:
+	//	pname = "Multi Update"
 	default:
 		panic("error node type")
 	}
 
 	// Get Node's operator object info ,such as table, view
 	if options.Format == EXPLAIN_FORMAT_TEXT {
-		buf.WriteString(pname)
+		if options.Verbose {
+			buf.WriteString(fmt.Sprintf("%s[%d]", pname, ndesc.Node.NodeId))
+		} else {
+			buf.WriteString(pname)
+		}
+
 		switch ndesc.Node.NodeType {
 		case plan.Node_VALUE_SCAN:
 			buf.WriteString(" \"*VALUES*\" ")
@@ -156,6 +167,9 @@ func (ndesc *NodeDescribeImpl) GetNodeBasicInfo(ctx context.Context, options *Ex
 				buf.WriteString(ndesc.Node.ObjRef.GetSchemaName() + "." + ndesc.Node.ObjRef.GetObjName())
 			} else if ndesc.Node.TableDef != nil {
 				buf.WriteString(ndesc.Node.TableDef.GetName())
+			}
+			if ndesc.Node.Stats.ForceOneCN {
+				buf.WriteString(" [ForceOneCN]")
 			}
 		case plan.Node_FUNCTION_SCAN:
 			buf.WriteString(" on ")
@@ -351,7 +365,9 @@ func (ndesc *NodeDescribeImpl) GetExtraInfo(ctx context.Context, options *Explai
 		if err != nil {
 			return nil, err
 		}
-		lines = append(lines, filterInfo)
+		if len(filterInfo) > 0 {
+			lines = append(lines, filterInfo)
+		}
 	}
 
 	if len(ndesc.Node.RuntimeFilterBuildList) > 0 {
@@ -359,7 +375,9 @@ func (ndesc *NodeDescribeImpl) GetExtraInfo(ctx context.Context, options *Explai
 		if err != nil {
 			return nil, err
 		}
-		lines = append(lines, filterInfo)
+		if len(filterInfo) > 0 {
+			lines = append(lines, filterInfo)
+		}
 	}
 
 	// Get Limit And Offset info
@@ -396,7 +414,9 @@ func (ndesc *NodeDescribeImpl) GetExtraInfo(ctx context.Context, options *Explai
 		if err != nil {
 			return nil, err
 		}
-		lines = append(lines, msgInfo)
+		if len(msgInfo) > 0 {
+			lines = append(lines, msgInfo)
+		}
 	}
 
 	if len(ndesc.Node.RecvMsgList) > 0 {
@@ -404,7 +424,9 @@ func (ndesc *NodeDescribeImpl) GetExtraInfo(ctx context.Context, options *Explai
 		if err != nil {
 			return nil, err
 		}
-		lines = append(lines, msgInfo)
+		if len(msgInfo) > 0 {
+			lines = append(lines, msgInfo)
+		}
 	}
 	return lines, nil
 }
@@ -546,6 +568,9 @@ func (ndesc *NodeDescribeImpl) GetBlockFilterConditionInfo(ctx context.Context, 
 }
 
 func (ndesc *NodeDescribeImpl) GetRuntimeFilteProbeInfo(ctx context.Context, options *ExplainOptions) (string, error) {
+	if ndesc.Node.NodeType == plan.Node_JOIN && ndesc.Node.Stats.HashmapStats.Shuffle {
+		return "", nil
+	}
 	buf := bytes.NewBuffer(make([]byte, 0, 300))
 	buf.WriteString("Runtime Filter Probe: ")
 	if options.Format == EXPLAIN_FORMAT_TEXT {
@@ -572,6 +597,9 @@ func (ndesc *NodeDescribeImpl) GetRuntimeFilteProbeInfo(ctx context.Context, opt
 }
 
 func (ndesc *NodeDescribeImpl) GetRuntimeFilterBuildInfo(ctx context.Context, options *ExplainOptions) (string, error) {
+	if ndesc.Node.NodeType == plan.Node_JOIN && ndesc.Node.Stats.HashmapStats.Shuffle {
+		return "", nil
+	}
 	buf := bytes.NewBuffer(make([]byte, 0, 300))
 	buf.WriteString("Runtime Filter Build: ")
 	if options.Format == EXPLAIN_FORMAT_TEXT {
@@ -596,11 +624,15 @@ func (ndesc *NodeDescribeImpl) GetRuntimeFilterBuildInfo(ctx context.Context, op
 
 func (ndesc *NodeDescribeImpl) GetSendMessageInfo(ctx context.Context, options *ExplainOptions) (string, error) {
 	buf := bytes.NewBuffer(make([]byte, 0, 300))
-	buf.WriteString("Send Message: ")
 	if options.Format == EXPLAIN_FORMAT_TEXT {
 		first := true
 		for _, v := range ndesc.Node.SendMsgList {
-			if !first {
+			if v.GetMsgType() == int32(message.MsgJoinMap) {
+				continue
+			}
+			if first {
+				buf.WriteString("Send Message: ")
+			} else {
 				buf.WriteString(", ")
 			}
 			first = false
@@ -616,11 +648,15 @@ func (ndesc *NodeDescribeImpl) GetSendMessageInfo(ctx context.Context, options *
 
 func (ndesc *NodeDescribeImpl) GetRecvMessageInfo(ctx context.Context, options *ExplainOptions) (string, error) {
 	buf := bytes.NewBuffer(make([]byte, 0, 300))
-	buf.WriteString("Recv Message: ")
 	if options.Format == EXPLAIN_FORMAT_TEXT {
 		first := true
 		for _, v := range ndesc.Node.RecvMsgList {
-			if !first {
+			if v.GetMsgType() == int32(message.MsgJoinMap) {
+				continue
+			}
+			if first {
+				buf.WriteString("Recv Message: ")
+			} else {
 				buf.WriteString(", ")
 			}
 			first = false
@@ -677,9 +713,7 @@ func (ndesc *NodeDescribeImpl) GetGroupByInfo(ctx context.Context, options *Expl
 		}
 
 		if ndesc.Node.Stats.HashmapStats.ShuffleMethod == plan.ShuffleMethod_Reuse {
-			buf.WriteString(" shuffle: REUSE ")
-		} else if ndesc.Node.Stats.HashmapStats.ShuffleMethod == plan.ShuffleMethod_Reshuffle {
-			buf.WriteString(" RESHUFFLE ")
+			buf.WriteString(" shuffle: REUSE")
 		}
 	}
 	return buf.String(), nil
@@ -944,6 +978,9 @@ func (a AnalyzeInfoDescribeImpl) GetDescription(ctx context.Context, options *Ex
 	}
 
 	fmt.Fprintf(buf, " waitTime=%dms", a.AnalyzeInfo.WaitTimeConsumed/MILLION)
+	if options.NodeType == plan.Node_TABLE_SCAN {
+		fmt.Fprintf(buf, " inputBlocks=%d", a.AnalyzeInfo.InputBlocks)
+	}
 	fmt.Fprintf(buf, " inputRows=%d", a.AnalyzeInfo.InputRows)
 	fmt.Fprintf(buf, " outputRows=%d", a.AnalyzeInfo.OutputRows)
 	if a.AnalyzeInfo.InputSize < MB {
@@ -986,7 +1023,7 @@ func (c *CostDescribeImpl) GetDescription(ctx context.Context, options *ExplainO
 		if c.Stats.BlockNum > 0 {
 			blockNumStr = " blockNum=" + strconv.FormatInt(int64(c.Stats.BlockNum), 10)
 		}
-		if c.Stats.HashmapStats != nil && c.Stats.HashmapStats.HashmapSize > 0 {
+		if c.Stats.HashmapStats != nil && c.Stats.HashmapStats.HashmapSize > 1 {
 			hashmapSizeStr = " hashmapSize=" + strconv.FormatFloat(c.Stats.HashmapStats.HashmapSize, 'f', 2, 64)
 		}
 		buf.WriteString(" (cost=" + strconv.FormatFloat(c.Stats.Cost, 'f', 2, 64) +

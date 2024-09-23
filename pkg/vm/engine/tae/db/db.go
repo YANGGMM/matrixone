@@ -16,6 +16,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync/atomic"
 	"time"
@@ -24,7 +25,7 @@ import (
 
 	"github.com/matrixorigin/matrixone/pkg/logutil"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/db/dbutils"
-	gc2 "github.com/matrixorigin/matrixone/pkg/vm/engine/tae/db/gc"
+	gc2 "github.com/matrixorigin/matrixone/pkg/vm/engine/tae/db/gc/v2"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/db/merge"
 
 	"github.com/matrixorigin/matrixone/pkg/container/types"
@@ -62,7 +63,7 @@ type DB struct {
 
 	BGScanner          wb.IHeartbeater
 	BGCheckpointRunner checkpoint.Runner
-	MergeHandle        *MergeTaskBuilder
+	MergeScheduler     *merge.Scheduler
 
 	DiskCleaner *gc2.DiskCleaner
 
@@ -106,16 +107,22 @@ func (db *DB) ForceCheckpoint(
 		return err
 	}
 
-	timeout := time.After(flushDuration - time.Since(t0))
+	wait := flushDuration - time.Since(t0)
+	if wait < time.Minute {
+		wait = time.Minute
+	}
+
+	timeout := time.After(wait)
 	for {
 		select {
 		case <-timeout:
-			return moerr.NewInternalError(ctx, "timeout")
+			return moerr.NewInternalError(ctx, fmt.Sprintf("timeout for: %v", err))
 		default:
 			err = db.BGCheckpointRunner.ForceIncrementalCheckpoint(ts, true)
 			if dbutils.IsRetrieableCheckpoint(err) {
-				interval := flushDuration * time.Millisecond / 400
-				time.Sleep(interval)
+				db.BGCheckpointRunner.CleanPenddingCheckpoint()
+				interval := flushDuration.Milliseconds() / 400
+				time.Sleep(time.Duration(interval))
 				break
 			}
 			logutil.Debugf("[Force Checkpoint] takes %v", time.Since(t0))
@@ -127,7 +134,7 @@ func (db *DB) ForceCheckpoint(
 func (db *DB) ForceGlobalCheckpoint(
 	ctx context.Context,
 	ts types.TS,
-	flushDuration time.Duration) (err error) {
+	flushDuration, versionInterval time.Duration) (err error) {
 	// FIXME: cannot disable with a running job
 	db.BGCheckpointRunner.DisableCheckpoint()
 	defer db.BGCheckpointRunner.EnableCheckpoint()
@@ -138,7 +145,7 @@ func (db *DB) ForceGlobalCheckpoint(
 	if err != nil {
 		return err
 	}
-	if err = db.BGCheckpointRunner.ForceGlobalCheckpointSynchronously(ctx, ts, 0); err != nil {
+	if err = db.BGCheckpointRunner.ForceGlobalCheckpointSynchronously(ctx, ts, versionInterval); err != nil {
 		return err
 	}
 	logutil.Infof("[Force Global Checkpoint] takes %v", time.Since(t0))

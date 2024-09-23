@@ -20,10 +20,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/natefinch/lumberjack.v2"
+
+	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 )
 
 // SetupMOLogger sets up the global logger for MO Server.
@@ -37,9 +38,14 @@ func SetupMOLogger(conf *LogConfig) {
 	Infof("MO logger init, level=%s, log file=%s, stackLevel=%s", conf.Level, conf.Filename, conf.StacktraceLevel)
 }
 
+// NewMOLogger new a mo zap logger
+func NewMOLogger(cfg *LogConfig) (*zap.Logger, error) {
+	return GetLoggerWithOptions(cfg.GetLevel(), cfg.getEncoder(), cfg.getSyncer(), cfg.getOptions()...), nil
+}
+
 // initMOLogger initializes a zap Logger.
 func initMOLogger(cfg *LogConfig) (*zap.Logger, error) {
-	return GetLoggerWithOptions(cfg.getLevel(), cfg.getEncoder(), cfg.getSyncer(), cfg.getOptions()...), nil
+	return GetLoggerWithOptions(cfg.GetLevel(), cfg.getEncoder(), cfg.getSyncer(), cfg.getOptions()...), nil
 }
 
 // global zap logger for MO server.
@@ -124,7 +130,7 @@ func (cfg *LogConfig) getEncoder() zapcore.Encoder {
 	return getLoggerEncoder(cfg.Format)
 }
 
-func (cfg *LogConfig) getLevel() zap.AtomicLevel {
+func (cfg *LogConfig) GetLevel() zap.AtomicLevel {
 	level := zap.NewAtomicLevel()
 	err := level.UnmarshalText([]byte(cfg.Level))
 	if err != nil {
@@ -186,7 +192,7 @@ func getLoggerEncoder(format string) zapcore.Encoder {
 	case "console":
 		return zapcore.NewConsoleEncoder(encoderConfig)
 	default:
-		panic(moerr.NewInternalError(context.Background(), "unsupported log format: %s", format))
+		panic(moerr.NewInternalErrorf(context.Background(), "unsupported log format: %s", format))
 	}
 }
 
