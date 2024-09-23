@@ -75,8 +75,7 @@ const defaultSaltReadTimeout = time.Millisecond * 200
 
 const charsetBinary = 0x3f
 const charsetVarchar = 0x21
-const boolColumnLength = 12
-const boolColumnBinaryLength = 1
+const boolColumnLength = 1
 
 func init() {
 	serverVersion.Store("1.3.0")
@@ -2118,7 +2117,7 @@ func (mp *MysqlProtocolImpl) makeColumnDefinition41Payload(column *MysqlColumn, 
 		//int<2>              character set
 		pos = mp.io.WriteUint16(data, pos, charsetBinary)
 		//int<4>              column length
-		pos = mp.io.WriteUint32(data, pos, boolColumnBinaryLength)
+		pos = mp.io.WriteUint32(data, pos, boolColumnLength)
 		//int<1>              type
 		pos = mp.io.WriteUint8(data, pos, uint8(defines.MYSQL_TYPE_TINY))
 	} else {
@@ -2166,6 +2165,9 @@ func (mp *MysqlProtocolImpl) SendColumnDefinitionPacket(ctx context.Context, col
 	mysqlColumn, ok := column.(*MysqlColumn)
 	if !ok {
 		return nil, moerr.NewInternalError(ctx, "sendColumn need MysqlColumn")
+	}
+	if mysqlColumn.name == "delete" {
+		fmt.Printf("delete")
 	}
 
 	var data []byte
