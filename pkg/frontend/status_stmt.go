@@ -248,9 +248,10 @@ func (resper *MysqlResp) respStatus(ses *Session,
 		localFileName := ""
 		switch st := execCtx.stmt.(type) {
 		case *tree.Insert:
-			res.lastInsertId = execCtx.proc.GetLastInsertID()
-			if execCtx.proc.GetLastInsertID() != 0 {
-				ses.SetLastInsertID(execCtx.proc.GetLastInsertID())
+			lastInsertId := execCtx.proc.GetLastInsertID()
+			res.lastInsertId = lastInsertId
+			if lastInsertId != 0 {
+				ses.SetLastInsertID(lastInsertId)
 			}
 		case *tree.DropTable:
 			// handle dynamic table drop, cancel all the running daemon task
