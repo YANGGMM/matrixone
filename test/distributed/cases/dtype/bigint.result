@@ -539,3 +539,24 @@ a - 1
 18446744073709551612
 18446744073709551613
 drop table t1;
+drop table if exists t1;
+create table t1 (a bigint unsigned);
+insert into t1 values (0xFFFFFFFFFFFFFFFD);
+insert into t1 values (0xFFFFFFFFFFFFFFFE);
+select * from t1;
+a
+18446744073709551613
+18446744073709551614
+select * from t1 where a - 1 > 1;
+Data truncation: data out of range: data type int64, value '18446744073709551612'
+select * from t1 where a > 1;
+a
+18446744073709551613
+18446744073709551614
+select * from t1 where 1 + a > 1;
+Data truncation: data out of range: data type int64, value '18446744073709551614'
+select 1 + a from t1;
+1 + a
+18446744073709551614
+18446744073709551615
+drop table t1;
