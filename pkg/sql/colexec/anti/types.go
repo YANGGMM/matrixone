@@ -15,6 +15,7 @@
 package anti
 
 import (
+	"github.com/matrixorigin/matrixone/pkg/common/hashmap"
 	"github.com/matrixorigin/matrixone/pkg/common/reuse"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
@@ -35,6 +36,7 @@ const (
 
 type container struct {
 	state int
+	itr   hashmap.Iterator
 
 	batchRowCount int64
 	rbat          *batch.Batch
@@ -103,8 +105,7 @@ func (antiJoin *AntiJoin) Release() {
 
 func (antiJoin *AntiJoin) Reset(proc *process.Process, pipelineFailed bool, err error) {
 	ctr := &antiJoin.ctr
-	anal := proc.GetAnalyze(antiJoin.GetIdx(), antiJoin.GetParallelIdx(), antiJoin.GetParallelMajor())
-
+	ctr.itr = nil
 	ctr.resetExecutor()
 	ctr.resetExprExecutor()
 	ctr.cleanHashMap()
@@ -112,11 +113,15 @@ func (antiJoin *AntiJoin) Reset(proc *process.Process, pipelineFailed bool, err 
 	ctr.batchRowCount = 0
 
 	if antiJoin.ProjectList != nil {
-		anal.Alloc(antiJoin.ProjectAllocSize + antiJoin.ctr.maxAllocSize)
+		if antiJoin.OpAnalyzer != nil {
+			antiJoin.OpAnalyzer.Alloc(antiJoin.ProjectAllocSize + antiJoin.ctr.maxAllocSize)
+		}
 		antiJoin.ctr.maxAllocSize = 0
 		antiJoin.ResetProjection(proc)
 	} else {
-		anal.Alloc(antiJoin.ctr.maxAllocSize)
+		if antiJoin.OpAnalyzer != nil {
+			antiJoin.OpAnalyzer.Alloc(antiJoin.ctr.maxAllocSize)
+		}
 		antiJoin.ctr.maxAllocSize = 0
 	}
 }

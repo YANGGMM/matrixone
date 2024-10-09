@@ -246,6 +246,9 @@ func (e *Engine) init(ctx context.Context) error {
 		e.catalog.InsertColumns(bat)
 	}
 
+	// clear all tables in global stats.
+	e.globalStats.clearTables()
+
 	return nil
 }
 
@@ -328,7 +331,8 @@ func (e *Engine) getOrCreateSnapPart(
 				e,
 				nil,
 				state,
-				entry); err != nil {
+				entry,
+				false); err != nil {
 				return err
 			}
 		}
@@ -345,7 +349,7 @@ func (e *Engine) getOrCreateSnapPart(
 
 	start, end := snap.GetDuration()
 	//if has no checkpoints or ts > snap.end, use latest partition.
-	if snap.IsEmpty() || ts.Greater(&end) {
+	if snap.IsEmpty() || ts.GT(&end) {
 		ps, err := tbl.tryToSubscribe(ctx)
 		if err != nil {
 			return nil, err
@@ -355,7 +359,7 @@ func (e *Engine) getOrCreateSnapPart(
 		}
 		return ps, nil
 	}
-	if ts.Less(&start) {
+	if ts.LT(&start) {
 		return nil, moerr.NewInternalErrorNoCtxf(
 			"No valid checkpoints for snapshot read,maybe snapshot is too old, "+
 				"snapshot op:%s, start:%s, end:%s",
@@ -420,7 +424,7 @@ func (e *Engine) LazyLoadLatestCkp(
 				}
 			}()
 			for _, entry := range entries {
-				if err = consumeEntry(ctx, tbl.primarySeqnum, e, cache, state, entry); err != nil {
+				if err = consumeEntry(ctx, tbl.primarySeqnum, e, cache, state, entry, false); err != nil {
 					return err
 				}
 			}

@@ -23,9 +23,13 @@ var (
 	EmptyBatch = &Batch{rowCount: 0}
 
 	EmptyForConstFoldBatch = &Batch{
-		Cnt:      1,
 		Vecs:     make([]*vector.Vector, 0),
 		rowCount: 1,
+	}
+
+	CteEndBatch = &Batch{
+		Recursive: 2,
+		rowCount:  1,
 	}
 )
 
@@ -41,8 +45,6 @@ type Batch struct {
 	// Ro if true, Attrs is read only
 	Ro         bool
 	ShuffleIDX int32 //used only in shuffle
-	// reference count, default is 1
-	Cnt int64
 	// Attrs column name list, letter case: origin
 	Attrs []string
 	// Vecs col data
@@ -52,4 +54,6 @@ type Batch struct {
 
 	// row count of batch, to instead of old len(Zs).
 	rowCount int
+
+	offHeap bool
 }

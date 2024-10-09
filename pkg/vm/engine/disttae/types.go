@@ -24,10 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/matrixorigin/matrixone/pkg/vm/message"
-
-	"github.com/panjf2000/ants/v2"
-
 	"github.com/matrixorigin/matrixone/pkg/catalog"
 	"github.com/matrixorigin/matrixone/pkg/common/mpool"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
@@ -38,10 +34,12 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/logservice"
 	"github.com/matrixorigin/matrixone/pkg/logutil"
 	"github.com/matrixorigin/matrixone/pkg/objectio"
+	"github.com/matrixorigin/matrixone/pkg/pb/api"
 	"github.com/matrixorigin/matrixone/pkg/pb/metadata"
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
 	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	qclient "github.com/matrixorigin/matrixone/pkg/queryservice/client"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
 	"github.com/matrixorigin/matrixone/pkg/txn/client"
 	"github.com/matrixorigin/matrixone/pkg/txn/trace"
 	"github.com/matrixorigin/matrixone/pkg/udf"
@@ -51,13 +49,15 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/disttae/logtailreplay"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/blockio"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/index"
+	"github.com/matrixorigin/matrixone/pkg/vm/message"
 	"github.com/matrixorigin/matrixone/pkg/vm/process"
+	"github.com/panjf2000/ants/v2"
 )
 
 const (
 	PREFETCH_THRESHOLD  = 256
 	PREFETCH_ROUNDS     = 24
-	SMALLSCAN_THRESHOLD = 100
+	SMALLSCAN_THRESHOLD = 150
 	LARGESCAN_THRESHOLD = 1500
 )
 
@@ -115,12 +115,6 @@ func noteSplitAlter(note string) (bool, int, uint64, string) {
 	}
 	panic("bad format of alter note")
 }
-
-const (
-	SMALL = iota
-	NORMAL
-	LARGE
-)
 
 const (
 	MO_DATABASE_ID_NAME_IDX       = 1
@@ -225,6 +219,10 @@ type Engine struct {
 	moColumnsCreatedTime  *vector.Vector
 }
 
+func (e *Engine) SetService(svr string) {
+	e.service = svr
+}
+
 func (txn *Transaction) String() string {
 	return fmt.Sprintf("writes %v", txn.writes)
 }
@@ -249,6 +247,8 @@ type Transaction struct {
 	workspaceSize uint64
 	// the total row count for insert entries when txn commits.
 	insertCount int
+	// the approximation of total row count for delete entries when txn commits.
+	approximateInMemDeleteCnt int
 	// the last snapshot write offset
 	snapshotWriteOffset int
 
@@ -338,13 +338,13 @@ func (b *deletedBlocks) addDeletedBlocks(blockID *types.Blockid, offsets []int64
 	b.offsets[*blockID] = append(b.offsets[*blockID], offsets...)
 }
 
-func (b *deletedBlocks) getDeletedRowIDs(dest *[]types.Rowid) {
+func (b *deletedBlocks) getDeletedRowIDs(appendTo func(row *types.Rowid)) {
 	b.RLock()
 	defer b.RUnlock()
 	for bid, offsets := range b.offsets {
 		for _, offset := range offsets {
 			rowId := types.NewRowid(&bid, uint32(offset))
-			*dest = append(*dest, *rowId)
+			appendTo(rowId)
 		}
 	}
 }
@@ -363,6 +363,43 @@ func (b *deletedBlocks) iter(fn func(*types.Blockid, []int64) bool) {
 			return
 		}
 	}
+}
+
+func NewTxnWorkSpace(eng *Engine, proc *process.Process) *Transaction {
+	id := objectio.NewSegmentid()
+	bytes := types.EncodeUuid(id)
+	txn := &Transaction{
+		proc:               proc,
+		engine:             eng,
+		idGen:              eng.idGen,
+		tnStores:           eng.GetTNServices(),
+		tableCache:         new(sync.Map),
+		databaseMap:        new(sync.Map),
+		deletedDatabaseMap: new(sync.Map),
+		tableOps:           newTableOps(),
+		tablesInVain:       make(map[uint64]int),
+		rowId: [6]uint32{
+			types.DecodeUint32(bytes[0:4]),
+			types.DecodeUint32(bytes[4:8]),
+			types.DecodeUint32(bytes[8:12]),
+			types.DecodeUint32(bytes[12:16]),
+			0,
+			0,
+		},
+		segId: *id,
+		deletedBlocks: &deletedBlocks{
+			offsets: map[types.Blockid][]int64{},
+		},
+		cnBlkId_Pos:          map[types.Blockid]Pos{},
+		batchSelectList:      make(map[*batch.Batch][]int64),
+		toFreeBatches:        make(map[tableKey][]*batch.Batch),
+		syncCommittedTSCount: eng.cli.GetSyncLatestCommitTSTimes(),
+	}
+
+	txn.readOnly.Store(true)
+	// transaction's local segment for raw batch.
+	colexec.Get().PutCnSegment(id, colexec.TxnWorkSpaceIdType)
+	return txn
 }
 
 func (txn *Transaction) PutCnBlockDeletes(blockId *types.Blockid, offsets []int64) {
@@ -707,7 +744,7 @@ func (txn *Transaction) handleRCSnapshot(ctx context.Context, commit bool) error
 		txn.resetSnapshot()
 	}
 	//Transfer row ids for deletes in RC isolation
-	return txn.transferDeletesLocked(ctx, commit)
+	return txn.transferInmemTombstoneLocked(ctx, commit)
 }
 
 // Entry represents a delete/insert
@@ -821,70 +858,24 @@ type txnTable struct {
 	relKind       string
 	createSql     string
 	constraint    []byte
+	extraInfo     *api.SchemaExtra
 
 	// timestamp of the last operation on this table
 	lastTS timestamp.Timestamp
-
-	// this should be the statement id
-	// but seems that we're not maintaining it at the moment
-	// localTS timestamp.Timestamp
-	//rowid in mo_tables
-	rowid types.Rowid
-	//rowids in mo_columns
-	rowids []types.Rowid
 
 	// process for statement
 	//proc *process.Process
 	proc atomic.Pointer[process.Process]
 
 	enableLogFilterExpr atomic.Bool
-}
 
-type withFilterMixin struct {
-	ctx      context.Context
-	fs       fileservice.FileService
-	ts       timestamp.Timestamp
-	proc     *process.Process
-	tableDef *plan.TableDef
-
-	// columns used for reading
-	columns struct {
-		seqnums  []uint16
-		colTypes []types.Type
-
-		pkPos                    int // -1 means no primary key in columns
-		indexOfFirstSortedColumn int
-	}
-
-	filterState struct {
-		//point select for primary key
-		expr     *plan.Expr
-		filter   objectio.BlockReadFilter
-		seqnums  []uint16 // seqnums of the columns in the filter
-		colTypes []types.Type
-	}
+	remoteWorkspace bool
+	createdInTxn    bool
+	eng             engine.Engine
 }
 
 // FIXME: no pointer here
 type blockSortHelper struct {
 	blk *objectio.BlockInfo
 	zm  index.ZM
-}
-
-type reader struct {
-	withFilterMixin
-
-	source engine.DataSource
-	ts     timestamp.Timestamp
-
-	memFilter MemPKFilter
-
-	scanType int
-}
-
-type mergeReader struct {
-	rds []engine.Reader
-}
-
-type emptyReader struct {
 }

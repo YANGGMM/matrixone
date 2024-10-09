@@ -15,6 +15,7 @@
 package semi
 
 import (
+	"github.com/matrixorigin/matrixone/pkg/common/hashmap"
 	"github.com/matrixorigin/matrixone/pkg/common/reuse"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
@@ -35,8 +36,8 @@ const (
 
 type container struct {
 	state int
-
-	rbat *batch.Batch
+	itr   hashmap.Iterator
+	rbat  *batch.Batch
 
 	expr colexec.ExpressionExecutor
 
@@ -103,8 +104,7 @@ func (semiJoin *SemiJoin) Release() {
 
 func (semiJoin *SemiJoin) Reset(proc *process.Process, pipelineFailed bool, err error) {
 	ctr := &semiJoin.ctr
-	anal := proc.GetAnalyze(semiJoin.GetIdx(), semiJoin.GetParallelIdx(), semiJoin.GetParallelMajor())
-
+	ctr.itr = nil
 	ctr.resetExecutor()
 	ctr.resetExprExecutor()
 	ctr.cleanHashMap()
@@ -112,11 +112,16 @@ func (semiJoin *SemiJoin) Reset(proc *process.Process, pipelineFailed bool, err 
 	ctr.skipProbe = false
 
 	if semiJoin.ProjectList != nil {
-		anal.Alloc(semiJoin.ProjectAllocSize + semiJoin.ctr.maxAllocSize)
+		if semiJoin.OpAnalyzer != nil {
+			semiJoin.OpAnalyzer.Alloc(semiJoin.ProjectAllocSize + semiJoin.ctr.maxAllocSize)
+		}
+
 		semiJoin.ctr.maxAllocSize = 0
 		semiJoin.ResetProjection(proc)
 	} else {
-		anal.Alloc(semiJoin.ctr.maxAllocSize)
+		if semiJoin.OpAnalyzer != nil {
+			semiJoin.OpAnalyzer.Alloc(semiJoin.ctr.maxAllocSize)
+		}
 		semiJoin.ctr.maxAllocSize = 0
 	}
 }

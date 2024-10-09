@@ -16,6 +16,7 @@ package compile
 
 import (
 	"context"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
 	"github.com/matrixorigin/matrixone/pkg/defines"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/aggexec"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/apply"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/hashbuild"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/indexbuild"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/shufflebuild"
@@ -34,12 +36,12 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/google/uuid"
-	"github.com/matrixorigin/matrixone/pkg/sql/colexec/source"
 	"github.com/stretchr/testify/require"
+
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/source"
 
 	mock_frontend "github.com/matrixorigin/matrixone/pkg/frontend/test"
 	"github.com/matrixorigin/matrixone/pkg/pb/pipeline"
-	plan2 "github.com/matrixorigin/matrixone/pkg/pb/plan"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/anti"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/deletion"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/dispatch"
@@ -86,7 +88,6 @@ func Test_EncodeProcessInfo(t *testing.T) {
 	txnOperator := mock_frontend.NewMockTxnOperator(ctrl)
 	txnOperator.EXPECT().Snapshot().AnyTimes()
 
-	a := reuse.Alloc[process.AnalyzeInfo](nil)
 	proc := process.NewTopProcess(defines.AttachAccountId(context.TODO(), catalog.System_Account),
 		nil,
 		nil,
@@ -100,7 +101,6 @@ func Test_EncodeProcessInfo(t *testing.T) {
 	proc.Base.Id = "1"
 	proc.Base.Lim = process.Limitation{}
 	proc.Base.UnixTime = 1000000
-	proc.Base.AnalInfos = []*process.AnalyzeInfo{a}
 	proc.Base.SessionInfo = process.SessionInfo{
 		Account:        "",
 		User:           "",
@@ -237,6 +237,7 @@ func Test_convertToPipelineInstruction(t *testing.T) {
 		&shufflebuild.ShuffleBuild{},
 		&indexbuild.IndexBuild{},
 		&source.Source{},
+		&apply.Apply{TableFunction: &table_function.TableFunction{}},
 	}
 	ctx := &scopeContext{
 		id:       1,
@@ -311,24 +312,12 @@ func Test_convertToVmInstruction(t *testing.T) {
 		{Op: int32(vm.Source), StreamScan: &pipeline.StreamScan{}},
 		{Op: int32(vm.ShuffleBuild), ShuffleBuild: &pipeline.Shufflebuild{}},
 		{Op: int32(vm.IndexBuild), IndexBuild: &pipeline.Indexbuild{}},
+		{Op: int32(vm.Apply), Apply: &pipeline.Apply{}, TableFunction: &pipeline.TableFunction{}},
 	}
 	for _, instruction := range instructions {
 		_, err := convertToVmOperator(instruction, ctx, nil)
 		require.Nil(t, err)
 	}
-}
-
-func Test_mergeAnalyseInfo(t *testing.T) {
-	target := newAnalyzeModule()
-	a := reuse.Alloc[process.AnalyzeInfo](nil)
-	target.analInfos = []*process.AnalyzeInfo{a}
-	ana := &pipeline.AnalysisList{
-		List: []*plan2.AnalyzeInfo{
-			{},
-		},
-	}
-	mergeAnalyseInfo(target, ana)
-	require.Equal(t, len(ana.List), 1)
 }
 
 func Test_convertToProcessLimitation(t *testing.T) {
@@ -346,13 +335,6 @@ func Test_convertToProcessSessionInfo(t *testing.T) {
 	}
 	_, err := process.ConvertToProcessSessionInfo(sei)
 	require.Nil(t, err)
-}
-
-func Test_convertToPlanAnalyzeInfo(t *testing.T) {
-	info := reuse.Alloc[process.AnalyzeInfo](nil)
-	info.InputRows = 100
-	analyzeInfo := convertToPlanAnalyzeInfo(info)
-	require.Equal(t, analyzeInfo.InputRows, int64(100))
 }
 
 func Test_decodeBatch(t *testing.T) {
@@ -376,7 +358,6 @@ func Test_decodeBatch(t *testing.T) {
 		Recursive:  0,
 		Ro:         false,
 		ShuffleIDX: 0,
-		Cnt:        1,
 		Attrs:      []string{"1"},
 		Vecs:       []*vector.Vector{vector.NewVec(types.T_int64.ToType())},
 		Aggs:       []aggexec.AggFuncExec{agg0},
@@ -386,4 +367,98 @@ func Test_decodeBatch(t *testing.T) {
 	require.Nil(t, err)
 	_, err = decodeBatch(mp, data)
 	require.Nil(t, err)
+}
+
+func Test_GetProcByUuid(t *testing.T) {
+	_ = colexec.NewServer(nil)
+
+	{
+		// first get action or deletion just convert the k-v to be `ready to remove` status.
+		// and the next action will remove it.
+		uid, err := uuid.NewV7()
+		require.Nil(t, err)
+
+		receiver := &messageReceiverOnServer{
+			connectionCtx: context.TODO(),
+		}
+
+		p0 := &process.Process{}
+		c0 := process.RemotePipelineInformationChannel(make(chan *process.WrapCs))
+		require.NoError(t, colexec.Get().PutProcIntoUuidMap(uid, p0, c0))
+
+		// this action will convert it to be ready-to-remove status.
+		colexec.Get().DeleteUuids([]uuid.UUID{uid})
+
+		// get a nil p and c.
+		p, c, err := receiver.GetProcByUuid(uid, time.Second)
+		require.Nil(t, err)
+		require.Nil(t, p)
+		require.Nil(t, c)
+
+		colexec.Get().DeleteUuids([]uuid.UUID{uid})
+	}
+
+	{
+		// if receiver done, get method should exit.
+		// 1. return nil.
+		// 2. no need to return error.
+		cctx, ccancel := context.WithCancel(context.Background())
+		receiver := &messageReceiverOnServer{
+			connectionCtx: cctx,
+		}
+		ccancel()
+		p, _, err := receiver.GetProcByUuid(uuid.UUID{}, time.Second)
+		require.Nil(t, err)
+		require.Nil(t, p)
+
+		// two action to delete the uuid can make sure the producer and consumer flag uuid done.
+		colexec.Get().DeleteUuids([]uuid.UUID{{}})
+		colexec.Get().DeleteUuids([]uuid.UUID{{}})
+	}
+
+	{
+		// if receiver gets proc timeout, should exit.
+		// 1. return error.
+		receiver := &messageReceiverOnServer{
+			connectionCtx: context.TODO(),
+		}
+		p, _, err := receiver.GetProcByUuid(uuid.UUID{}, time.Second)
+		require.NotNil(t, err)
+		require.Nil(t, p)
+
+		colexec.Get().DeleteUuids([]uuid.UUID{{}})
+		colexec.Get().DeleteUuids([]uuid.UUID{{}})
+	}
+
+	{
+		// test get succeed.
+		uid, err := uuid.NewV7()
+		require.Nil(t, err)
+
+		receiver := &messageReceiverOnServer{
+			connectionCtx: context.TODO(),
+		}
+
+		p0 := &process.Process{}
+		c0 := process.RemotePipelineInformationChannel(make(chan *process.WrapCs))
+		require.NoError(t, colexec.Get().PutProcIntoUuidMap(uid, p0, c0))
+
+		p, c, err := receiver.GetProcByUuid(uid, time.Second)
+		require.Nil(t, err)
+		require.Equal(t, p0, p)
+		require.Equal(t, c0, c)
+
+		colexec.Get().DeleteUuids([]uuid.UUID{uid})
+		colexec.Get().DeleteUuids([]uuid.UUID{uid})
+	}
+
+	{
+		// test if receiver done first, put action should return error.
+		colexec.Get().GetProcByUuid(uuid.UUID{}, true)
+		err := colexec.Get().PutProcIntoUuidMap(uuid.UUID{}, nil, nil)
+		require.NotNil(t, err)
+
+		colexec.Get().DeleteUuids([]uuid.UUID{{}})
+		colexec.Get().DeleteUuids([]uuid.UUID{{}})
+	}
 }

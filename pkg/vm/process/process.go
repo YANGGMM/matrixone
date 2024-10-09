@@ -41,15 +41,6 @@ import (
 
 const DefaultBatchSize = 8192
 
-func (wreg *WaitRegister) CleanChannel(m *mpool.MPool) {
-	for len(wreg.Ch) > 0 {
-		msg := <-wreg.Ch
-		if msg != nil && msg.Batch != nil {
-			msg.Batch.Clean(m)
-		}
-	}
-}
-
 func (proc *Process) QueryId() string {
 	return proc.Base.Id
 }
@@ -152,13 +143,6 @@ func (proc *Process) OperatorOutofMemory(size int64) bool {
 	return proc.Mp().Cap() < size
 }
 
-func (proc *Process) GetAnalyze(idx, parallelIdx int, parallelMajor bool) Analyze {
-	if idx >= len(proc.Base.AnalInfos) || idx < 0 {
-		return &operatorAnalyzer{analInfo: nil, parallelIdx: parallelIdx, parallelMajor: parallelMajor}
-	}
-	return &operatorAnalyzer{analInfo: proc.Base.AnalInfos[idx], wait: 0, parallelIdx: parallelIdx, parallelMajor: parallelMajor}
-}
-
 func (proc *Process) AllocVectorOfRows(typ types.Type, nele int, nsp *nulls.Nulls) (*vector.Vector, error) {
 	vec := vector.NewVec(typ)
 	err := vec.PreExtend(nele, proc.Mp())
@@ -177,11 +161,11 @@ func (proc *Process) CopyValueScanBatch(src *Process) {
 }
 
 func (proc *Process) NewBatchFromSrc(src *batch.Batch, preAllocSize int) (*batch.Batch, error) {
-	bat := batch.NewWithSize(len(src.Vecs))
+	bat := batch.NewOffHeapWithSize(len(src.Vecs))
 	bat.SetAttributes(src.Attrs)
 	bat.Recursive = src.Recursive
 	for i := range bat.Vecs {
-		v := vector.NewVec(*src.Vecs[i].GetType())
+		v := vector.NewOffHeapVecWithType(*src.Vecs[i].GetType())
 		if v.Capacity() < preAllocSize {
 			err := v.PreExtend(preAllocSize, proc.Mp())
 			if err != nil {

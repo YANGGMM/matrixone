@@ -54,6 +54,17 @@ const (
 )
 
 var (
+	needSkipDbs = map[string]bool{
+		"mysql":              true,
+		"system":             true,
+		"system_metrics":     true,
+		"mo_task":            true,
+		"mo_debug":           true,
+		"information_schema": true,
+		catalog.MO_CATALOG:   true,
+	}
+)
+var (
 	// see the comment in fuzzyCheck func genCondition for the reason why has to be two SQLs
 	fuzzyNonCompoundCheck = "select %s from `%s`.`%s` where %s in (%s) group by %s having count(*) > 1 limit 1;"
 	fuzzyCompoundCheck    = "select serial(%s) from `%s`.`%s` where %s group by serial(%s) having count(*) > 1 limit 1;"
@@ -504,6 +515,22 @@ func partsToColsStr(parts []string) string {
 		}
 	}
 	return temp
+}
+
+// haveSinkScanInPlan Start from the `curNodeIdx` node, recursively check its Subtree all nodes,
+// determine if they contain `SINK_SCAN` node in the subtree
+func haveSinkScanInPlan(nodes []*plan.Node, curNodeIdx int32) bool {
+	node := nodes[curNodeIdx]
+	if node.NodeType == plan.Node_SINK_SCAN {
+		return true
+	}
+	for _, newIdx := range node.Children {
+		flag := haveSinkScanInPlan(nodes, newIdx)
+		if flag {
+			return flag
+		}
+	}
+	return false
 }
 
 // genInsertMoTablePartitionsSql: Generate an insert statement for insert index metadata into `mo_catalog.mo_table_partitions`

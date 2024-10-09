@@ -150,6 +150,21 @@ func NewExpressionExecutor(proc *process.Process, planExpr *plan.Expr) (Expressi
 		}
 		return NewFixedVectorExpressionExecutor(proc.Mp(), true, vec), nil
 
+	case *plan.Expr_List:
+		executor := NewListExpressionExecutor()
+		resultVecTyp := t.List.List[0].GetTyp()
+		typ := types.New(types.T(resultVecTyp.Id), resultVecTyp.Width, resultVecTyp.Scale)
+		executor.Init(proc, typ, len(t.List.List))
+		for i := range executor.parameterExecutor {
+			subExecutor, paramErr := NewExpressionExecutor(proc, t.List.List[i])
+			if paramErr != nil {
+				executor.Free()
+				return nil, paramErr
+			}
+			executor.SetParameter(i, subExecutor)
+		}
+		return executor, nil
+
 	case *plan.Expr_F:
 		overloadID := t.F.GetFunc().GetObj()
 		overload, err := function.GetFunctionById(proc.Ctx, overloadID)
@@ -407,6 +422,80 @@ func (expr *VarExpressionExecutor) IsColumnExpr() bool {
 	return false
 }
 
+type ListExpressionExecutor struct {
+	mp *mpool.MPool
+
+	typ               types.Type
+	resultVector      *vector.Vector
+	parameterExecutor []ExpressionExecutor
+}
+
+func (expr *ListExpressionExecutor) Eval(proc *process.Process, batches []*batch.Batch, selectList []bool) (*vector.Vector, error) {
+	if expr.resultVector == nil {
+		expr.resultVector = vector.NewVec(expr.typ)
+	} else {
+		expr.resultVector.CleanOnlyData()
+	}
+	for i := range expr.parameterExecutor {
+		vec, err := expr.parameterExecutor[i].Eval(proc, batches, selectList)
+		if err != nil {
+			return nil, err
+		}
+		err = expr.resultVector.UnionOne(vec, 0, expr.mp)
+		if err != nil {
+			return nil, err
+		}
+	}
+	expr.resultVector.SetLength(len(expr.parameterExecutor))
+	return expr.resultVector, nil
+}
+
+func (expr *ListExpressionExecutor) EvalWithoutResultReusing(proc *process.Process, batches []*batch.Batch, _ []bool) (*vector.Vector, error) {
+	vec, err := expr.Eval(proc, batches, nil)
+	if err != nil {
+		return nil, err
+	}
+	expr.resultVector = nil
+	return vec, nil
+}
+
+func (expr *ListExpressionExecutor) Free() {
+	if expr == nil {
+		return
+	}
+	for _, e := range expr.parameterExecutor {
+		e.Free()
+	}
+	if expr.resultVector != nil {
+		expr.resultVector.Free(expr.mp)
+		expr.resultVector = nil
+	}
+	reuse.Free[ListExpressionExecutor](expr, nil)
+}
+
+func (expr *ListExpressionExecutor) IsColumnExpr() bool {
+	return false
+}
+
+func (expr *ListExpressionExecutor) Init(proc *process.Process, typ types.Type, parameterNum int) {
+	m := proc.Mp()
+
+	expr.typ = typ
+	expr.mp = m
+	expr.parameterExecutor = make([]ExpressionExecutor, parameterNum)
+	expr.resultVector = vector.NewVec(typ)
+}
+
+func (expr *ListExpressionExecutor) SetParameter(index int, executor ExpressionExecutor) {
+	expr.parameterExecutor[index] = executor
+}
+
+func (expr *ListExpressionExecutor) ResetForNextQuery() {
+	for _, e := range expr.parameterExecutor {
+		e.ResetForNextQuery()
+	}
+}
+
 func (expr *FunctionExpressionExecutor) Init(
 	proc *process.Process,
 	parameterNum int,
@@ -554,6 +643,7 @@ func (expr *FunctionExpressionExecutor) Eval(proc *process.Process, batches []*b
 		expr.parameterResults, expr.resultVector, proc, batches[0].RowCount(), &expr.selectList); err != nil {
 		return nil, err
 	}
+
 	return expr.resultVector.GetResultVector(), nil
 }
 
@@ -599,17 +689,16 @@ func (expr *FunctionExpressionExecutor) IsColumnExpr() bool {
 	return false
 }
 
-func (expr *ColumnExpressionExecutor) Eval(proc *process.Process, batches []*batch.Batch, _ []bool) (*vector.Vector, error) {
+func (expr *ColumnExpressionExecutor) Eval(_ *process.Process, batches []*batch.Batch, _ []bool) (*vector.Vector, error) {
 	relIndex := expr.relIndex
 	// XXX it's a bad hack here. root cause is pipeline set a wrong relation index here.
 	if len(batches) == 1 {
 		relIndex = 0
 	}
 
-	// protected code. In fact, we shouldn't receive a wrong index here.
-	// if happens, it means it's a bad expression for the input data that we cannot calculate it.
-	if len(batches) <= relIndex || len(batches[relIndex].Vecs) <= expr.colIndex {
-		return nil, moerr.NewInternalError(proc.Ctx, "unexpected input batch for column expression")
+	// [hack-#002] our `select * from external table` is `select * from EmptyForConstFoldBatch`.
+	if batches[relIndex] == batch.EmptyForConstFoldBatch {
+		return expr.getConstNullVec(expr.typ, 1), nil
 	}
 
 	vec := batches[relIndex].Vecs[expr.colIndex]
@@ -748,7 +837,7 @@ func generateConstExpressionExecutor(proc *process.Process, typ types.Type, con 
 				}
 				vec, err = vector.NewConstArray(typ, array, 1, proc.Mp())
 			} else if typ.Oid == types.T_datalink {
-				_, _, _, err1 := types.ParseDatalink(sval)
+				_, _, err1 := function.ParseDatalink(sval, proc)
 				if err1 != nil {
 					return nil, err1
 				}

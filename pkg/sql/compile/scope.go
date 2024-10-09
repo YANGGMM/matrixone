@@ -17,14 +17,10 @@ package compile
 import (
 	"context"
 	"fmt"
+	"github.com/matrixorigin/matrixone/pkg/vm/engine/engine_util"
 	"strings"
 	"sync"
-
-	"github.com/matrixorigin/matrixone/pkg/container/batch"
-
-	"github.com/matrixorigin/matrixone/pkg/sql/colexec/dispatch"
-
-	"github.com/matrixorigin/matrixone/pkg/vm/message"
+	"time"
 
 	"github.com/matrixorigin/matrixone/pkg/catalog"
 	"github.com/matrixorigin/matrixone/pkg/cnservice/cnclient"
@@ -36,15 +32,16 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
 	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/dispatch"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/filter"
-
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/output"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/table_scan"
 	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
 	"github.com/matrixorigin/matrixone/pkg/sql/util"
+	"github.com/matrixorigin/matrixone/pkg/util/trace/impl/motrace/statistic"
 	"github.com/matrixorigin/matrixone/pkg/vm"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine"
-	"github.com/matrixorigin/matrixone/pkg/vm/engine/disttae"
+	"github.com/matrixorigin/matrixone/pkg/vm/message"
 	"github.com/matrixorigin/matrixone/pkg/vm/pipeline"
 	"github.com/matrixorigin/matrixone/pkg/vm/process"
 
@@ -163,10 +160,15 @@ func (s *Scope) Run(c *Compile) (err error) {
 		} else {
 			if s.DataSource.R == nil {
 				s.NodeInfo.Data = engine.BuildEmptyRelData()
+				stats := statistic.StatsInfoFromContext(c.proc.GetTopContext())
+
+				buildStart := time.Now()
 				readers, err := s.buildReaders(c)
+				stats.AddBuidReaderTimeConsumption(time.Since(buildStart))
 				if err != nil {
 					return err
 				}
+
 				s.DataSource.R = readers[0]
 				s.DataSource.R.SetOrderBy(s.DataSource.OrderBy)
 			}
@@ -341,11 +343,11 @@ func (s *Scope) RemoteRun(c *Compile) error {
 	case <-s.Proc.Ctx.Done():
 		// this clean-up action shouldn't be called before context check.
 		// because the clean-up action will cancel the context, and error will be suppressed.
-		p.Cleanup(s.Proc, err != nil, c.isPrepare, err)
+		p.CleanRootOperator(s.Proc, err != nil, c.isPrepare, err)
 		runErr = nil
 
 	default:
-		p.Cleanup(s.Proc, err != nil, c.isPrepare, err)
+		p.CleanRootOperator(s.Proc, err != nil, c.isPrepare, err)
 	}
 
 	// sender should be closed after cleanup (tell the children-pipeline that query was done).
@@ -359,6 +361,9 @@ func (s *Scope) RemoteRun(c *Compile) error {
 func (s *Scope) ParallelRun(c *Compile) (err error) {
 	var parallelScope *Scope
 
+	// Warning: It is possible that an error occurs before the pipeline has executed prepare, triggering
+	// defer `pipeline.Cleanup()`, and execute `reset()` and `free()`. If the operator analyzer is not
+	// instantiated and there is a statistical operation in reset, a null pointer will occur
 	defer func() {
 		if e := recover(); e != nil {
 			err = moerr.ConvertPanicError(s.Proc.Ctx, e)
@@ -432,6 +437,11 @@ func buildScanParallelRun(s *Scope, c *Compile) (*Scope, error) {
 		return nil, moerr.NewInternalError(c.proc.Ctx, "ordered scan cannot run in remote.")
 	}
 
+	stats := statistic.StatsInfoFromContext(c.proc.GetTopContext())
+	buildStart := time.Now()
+	defer func() {
+		stats.AddBuidReaderTimeConsumption(time.Since(buildStart))
+	}()
 	readers, err := s.buildReaders(c)
 	if err != nil {
 		return nil, err
@@ -525,10 +535,10 @@ func (s *Scope) handleRuntimeFilter(c *Compile) error {
 		if !ok {
 			panic("missing instruction for runtime filter!")
 		}
-		if arg.E != nil {
-			appendNotPkFilter = append(appendNotPkFilter, plan2.DeepCopyExpr(arg.E))
+		err = arg.SetRuntimeExpr(s.Proc, appendNotPkFilter)
+		if err != nil {
+			return err
 		}
-		arg.SetExeExpr(colexec.RewriteFilterExprList(appendNotPkFilter))
 	}
 
 	// reset datasource
@@ -546,14 +556,16 @@ func (s *Scope) handleRuntimeFilter(c *Compile) error {
 			panic("can not expand ranges on remote pipeline!")
 		}
 
-		newExprList := plan2.DeepCopyExprList(inExprList)
-		if len(s.DataSource.node.BlockFilterList) > 0 {
-			tmp := colexec.RewriteFilterExprList(plan2.DeepCopyExprList(s.DataSource.node.BlockFilterList))
-			tmp, err = plan2.ConstantFold(batch.EmptyForConstFoldBatch, tmp, s.Proc, true, true)
+		for _, e := range s.DataSource.BlockFilterList {
+			err = plan2.EvalFoldExpr(s.Proc, e, &c.filterExprExes)
 			if err != nil {
 				return err
 			}
-			newExprList = append(newExprList, tmp)
+		}
+
+		newExprList := plan2.DeepCopyExprList(inExprList)
+		if len(s.DataSource.node.BlockFilterList) > 0 {
+			newExprList = append(newExprList, s.DataSource.BlockFilterList...)
 		}
 
 		relData, err := c.expandRanges(s.DataSource.node, s.DataSource.Rel, newExprList)
@@ -586,8 +598,10 @@ func newParallelScope(s *Scope) (*Scope, []*Scope) {
 		return s, nil
 	}
 
-	if _, ok := s.RootOp.(*dispatch.Dispatch); ok {
-		panic("dispatch operator should never dup!")
+	if op, ok := s.RootOp.(*dispatch.Dispatch); ok {
+		if len(op.RemoteRegs) > 0 {
+			panic("pipeline end with dispatch should have been merged in multi CN!")
+		}
 	}
 
 	// fake scope is used to merge parallel scopes, and do nothing itself
@@ -654,12 +668,7 @@ func (s *Scope) ReplaceLeafOp(dstLeafOp vm.Operator) {
 func (s *Scope) sendNotifyMessage(wg *sync.WaitGroup, resultChan chan notifyMessageResult) {
 	// if context has done, it means the user or other part of the pipeline stops this query.
 	closeWithError := func(err error, reg *process.WaitRegister, sender *messageSenderOnClient) {
-		if reg != nil {
-			select {
-			case <-s.Proc.Ctx.Done():
-			case reg.Ch <- nil:
-			}
-		}
+		reg.Ch2 <- process.NewPipelineSignalToDirectly(nil, s.Proc.Mp())
 
 		select {
 		case <-s.Proc.Ctx.Done():
@@ -711,7 +720,7 @@ func (s *Scope) sendNotifyMessage(wg *sync.WaitGroup, resultChan chan notifyMess
 				sender.safeToClose = false
 				sender.alreadyClose = false
 
-				err = receiveMsgAndForward(s.Proc, sender, s.Proc.Reg.MergeReceivers[receiverIdx].Ch)
+				err = receiveMsgAndForward(sender, s.Proc.Reg.MergeReceivers[receiverIdx].Ch2)
 				closeWithError(err, s.Proc.Reg.MergeReceivers[receiverIdx], sender)
 			},
 		)
@@ -723,26 +732,14 @@ func (s *Scope) sendNotifyMessage(wg *sync.WaitGroup, resultChan chan notifyMess
 	}
 }
 
-func receiveMsgAndForward(proc *process.Process, sender *messageSenderOnClient, forwardCh chan *process.RegisterMessage) error {
+func receiveMsgAndForward(sender *messageSenderOnClient, forwardCh chan process.PipelineSignal) error {
 	for {
 		bat, end, err := sender.receiveBatch()
-		if err != nil {
+		if err != nil || end || bat == nil {
 			return err
 		}
-		if end {
-			return nil
-		}
 
-		if forwardCh != nil {
-			msg := &process.RegisterMessage{Batch: bat}
-			select {
-			case <-proc.Ctx.Done():
-				bat.Clean(proc.Mp())
-				return nil
-
-			case forwardCh <- msg:
-			}
-		}
+		forwardCh <- process.NewPipelineSignalToDirectly(bat, sender.mp)
 	}
 }
 
@@ -909,7 +906,7 @@ func (s *Scope) buildReaders(c *Compile) (readers []engine.Reader, err error) {
 
 				var subBlkList engine.RelData
 				if s.NodeInfo.Data == nil || s.NodeInfo.Data.DataCnt() <= 1 {
-					//Even subBlkList is nil,
+					//Even if subBlkList is nil,
 					//we still need to build reader for sub partition table to read data from memory.
 					subBlkList = nil
 				} else {
@@ -942,7 +939,7 @@ func (s *Scope) buildReaders(c *Compile) (readers []engine.Reader, err error) {
 		newReaders := make([]engine.Reader, 0, s.NodeInfo.Mcpu)
 		step := len(readers) / s.NodeInfo.Mcpu
 		for i := 0; i < len(readers); i += step {
-			newReaders = append(newReaders, disttae.NewMergeReader(readers[i:i+step]))
+			newReaders = append(newReaders, engine_util.NewMergeReader(readers[i:i+step]))
 		}
 		readers = newReaders
 	}

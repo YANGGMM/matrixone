@@ -17,10 +17,6 @@ package testutil
 import (
 	"context"
 
-	"github.com/matrixorigin/matrixone/pkg/logutil"
-	"github.com/matrixorigin/matrixone/pkg/vm/engine"
-	catalog2 "github.com/matrixorigin/matrixone/pkg/vm/engine/tae/catalog"
-
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -36,18 +32,24 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/fileservice"
 	"github.com/matrixorigin/matrixone/pkg/lockservice"
 	"github.com/matrixorigin/matrixone/pkg/logservice"
+	"github.com/matrixorigin/matrixone/pkg/logutil"
 	"github.com/matrixorigin/matrixone/pkg/objectio"
 	"github.com/matrixorigin/matrixone/pkg/pb/lock"
 	logservice2 "github.com/matrixorigin/matrixone/pkg/pb/logservice"
 	"github.com/matrixorigin/matrixone/pkg/pb/metadata"
+	pb "github.com/matrixorigin/matrixone/pkg/pb/shard"
 	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	qclient "github.com/matrixorigin/matrixone/pkg/queryservice/client"
+	"github.com/matrixorigin/matrixone/pkg/shardservice"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
 	"github.com/matrixorigin/matrixone/pkg/sql/compile"
 	"github.com/matrixorigin/matrixone/pkg/txn/client"
 	"github.com/matrixorigin/matrixone/pkg/txn/service"
+	"github.com/matrixorigin/matrixone/pkg/vm/engine"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/disttae"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/disttae/logtailreplay"
+	catalog2 "github.com/matrixorigin/matrixone/pkg/vm/engine/tae/catalog"
+	"github.com/matrixorigin/matrixone/pkg/vm/process"
 )
 
 type TestDisttaeEngine struct {
@@ -148,6 +150,18 @@ func NewTestDisttaeEngine(
 		nil, //s.udfService
 	)
 	runtime.ServiceRuntime("").SetGlobalVariables(runtime.InternalSQLExecutor, sqlExecutor)
+
+	runtime.ServiceRuntime("").SetGlobalVariables(
+		runtime.ProcessCodecService,
+		process.NewCodecService(
+			de.txnClient,
+			fs,
+			new(mockLockService),
+			qc,
+			hakeeper,
+			nil,
+			de.Engine,
+		))
 
 	// InitLoTailPushModel presupposes that the internal sql executor has been initialized.
 	err = de.Engine.InitLogTailPushModel(ctx, de.timestampWaiter)
@@ -518,6 +532,61 @@ func (ml *mockLockService) CloseRemoteLockTable(group uint32, tableID uint64, ve
 	return false, nil
 }
 
+type mockShardService struct {
+}
+
+func MockShardService() *mockShardService {
+	return &mockShardService{}
+}
+
+func (ms *mockShardService) Config() shardservice.Config {
+	return shardservice.Config{Enable: true}
+}
+
+func (ms *mockShardService) GetStorage() shardservice.ShardStorage {
+	return nil
+}
+
+func (ms *mockShardService) Read(cxt context.Context, req shardservice.ReadRequest, opts shardservice.ReadOptions) error {
+	return nil
+}
+
+func (ms *mockShardService) HasLocalReplica(tableID, shardID uint64) (bool, error) {
+	return true, nil
+}
+
+func (ms *mockShardService) HasAllLocalReplicas(tableID uint64) (bool, error) {
+	return false, nil
+}
+
+func (ms *mockShardService) GetShardInfo(table uint64) (uint64, pb.Policy, bool, error) {
+	return table, 1, true, nil
+}
+
+func (ms *mockShardService) Create(ctx context.Context, table uint64, txnOp client.TxnOperator) error {
+	return nil
+}
+
+func (ms *mockShardService) Delete(ctx context.Context, table uint64, txnOp client.TxnOperator) error {
+	return nil
+}
+
+func (ms *mockShardService) ReplicaCount() int64 {
+	return 1
+}
+
+func (ms *mockShardService) TableReplicaCount(tableID uint64) int64 {
+	return 1
+}
+
+func (ms *mockShardService) Close() error {
+	return nil
+}
+
+func (ms *mockShardService) GetTableShards(tableID uint64) (pb.ShardsMetadata, []pb.TableShard, error) {
+	return pb.ShardsMetadata{}, nil, nil
+}
+
 var _ logservice.CNHAKeeperClient = new(testHAKeeperClient)
 
 type testHAKeeperClient struct {
@@ -553,4 +622,12 @@ func (ha *testHAKeeperClient) GetBackupData(ctx context.Context) ([]byte, error)
 
 func (ha *testHAKeeperClient) SendCNHeartbeat(ctx context.Context, hb logservice2.CNStoreHeartbeat) (logservice2.CommandBatch, error) {
 	return logservice2.CommandBatch{}, nil
+}
+
+func (ha *testHAKeeperClient) UpdateNonVotingReplicaNum(ctx context.Context, num uint64) error {
+	return nil
+}
+
+func (ha *testHAKeeperClient) UpdateNonVotingLocality(ctx context.Context, locality logservice2.Locality) error {
+	return nil
 }

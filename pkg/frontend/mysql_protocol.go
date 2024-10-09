@@ -78,7 +78,7 @@ const charsetVarchar = 0x21
 const boolColumnLength = 12
 
 func init() {
-	serverVersion.Store("0.5.0")
+	serverVersion.Store("1.3.0")
 }
 
 func InitServerVersion(v string) {
@@ -98,7 +98,7 @@ func InitServerVersion(v string) {
 			serverVersion.Store(string(vv))
 		}
 	} else {
-		serverVersion.Store("0.5.0")
+		serverVersion.Store("1.3.0")
 	}
 }
 
@@ -167,6 +167,10 @@ const (
 	DefaultMySQLState string = "HY000"
 )
 
+var (
+	gIO = NewIOPackage(true)
+)
+
 var _ MysqlRrWr = &MysqlProtocolImpl{}
 
 type debugStats struct {
@@ -203,7 +207,6 @@ type MysqlProtocolImpl struct {
 
 	sid string
 
-	//TODO: make it global
 	io IOPackage
 
 	tcpConn *Conn
@@ -466,6 +469,9 @@ func (mp *MysqlProtocolImpl) Read() ([]byte, error) {
 }
 func (mp *MysqlProtocolImpl) ReadLoadLocalPacket() ([]byte, error) {
 	return mp.tcpConn.ReadLoadLocalPacket()
+}
+func (mp *MysqlProtocolImpl) FreeLoadLocal() {
+	mp.tcpConn.FreeLoadLocal()
 }
 func (mp *MysqlProtocolImpl) Free(buf []byte) {
 	mp.tcpConn.allocator.Free(buf)
@@ -3055,7 +3061,7 @@ func NewMysqlClientProtocol(sid string, connectionID uint32, tcp *Conn, maxBytes
 	salt := generate_salt(20)
 	mysql := &MysqlProtocolImpl{
 		sid:              sid,
-		io:               NewIOPackage(true),
+		io:               gIO,
 		tcpConn:          tcp,
 		salt:             salt,
 		connectionID:     connectionID,

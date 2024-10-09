@@ -17,6 +17,8 @@ package hashmap_util
 import (
 	"testing"
 
+	"github.com/matrixorigin/matrixone/pkg/common/hashmap"
+
 	"github.com/matrixorigin/matrixone/pkg/common/mpool"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
@@ -51,16 +53,35 @@ func TestBuildHashMap(t *testing.T) {
 	inputBatch.Clean(proc.Mp())
 	require.NoError(t, err)
 
-	rf := &plan.RuntimeFilterSpec{
-		Tag:         0,
-		MatchPrefix: false,
-		UpperLimit:  0,
-		Expr:        nil,
-	}
-	err = hb.BuildHashmap(false, true, rf, proc)
+	err = hb.BuildHashmap(false, true, true, proc)
 	require.NoError(t, err)
 	require.Less(t, int64(0), hb.GetSize())
 	require.Less(t, uint64(0), hb.GetGroupCount())
 	hb.FreeWithError(proc)
 	require.Equal(t, int64(0), proc.Mp().CurrNB())
+}
+
+func TestHashMapAllocAndFree(t *testing.T) {
+	var hb HashmapBuilder
+	var err error
+	hb.IntHashMap, err = hashmap.NewIntHashMap(false)
+	require.NoError(t, err)
+	err = hb.IntHashMap.PreAlloc(100)
+	require.NoError(t, err)
+	hb.IntHashMap.Free()
+	hb.IntHashMap, err = hashmap.NewIntHashMap(false)
+	require.NoError(t, err)
+	err = hb.IntHashMap.PreAlloc(10000)
+	require.NoError(t, err)
+	hb.IntHashMap.Free()
+	hb.IntHashMap, err = hashmap.NewIntHashMap(false)
+	require.NoError(t, err)
+	err = hb.IntHashMap.PreAlloc(1000000)
+	require.NoError(t, err)
+	hb.IntHashMap.Free()
+	hb.IntHashMap, err = hashmap.NewIntHashMap(false)
+	require.NoError(t, err)
+	err = hb.IntHashMap.PreAlloc(100000000)
+	require.NoError(t, err)
+	hb.IntHashMap.Free()
 }

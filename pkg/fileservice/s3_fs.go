@@ -157,11 +157,13 @@ func (s *S3FS) initCaches(ctx context.Context, config CacheConfig) error {
 	}
 
 	// memory cache
-	if *config.MemoryCapacity > DisableCacheCapacity {
+	if config.MemoryCapacity != nil &&
+		*config.MemoryCapacity > DisableCacheCapacity {
 		s.memCache = NewMemCache(
 			fscache.ConstCapacity(int64(*config.MemoryCapacity)),
 			&config.CacheCallbacks,
 			s.perfCounterSets,
+			s.name,
 		)
 		logutil.Info("fileservice: memory cache initialized",
 			zap.Any("fs-name", s.name),
@@ -170,7 +172,9 @@ func (s *S3FS) initCaches(ctx context.Context, config CacheConfig) error {
 	}
 
 	// disk cache
-	if *config.DiskCapacity > DisableCacheCapacity && config.DiskPath != nil {
+	if config.DiskCapacity != nil &&
+		*config.DiskCapacity > DisableCacheCapacity &&
+		config.DiskPath != nil {
 		var err error
 		s.diskCache, err = NewDiskCache(
 			ctx,
@@ -179,6 +183,7 @@ func (s *S3FS) initCaches(ctx context.Context, config CacheConfig) error {
 			s.perfCounterSets,
 			true,
 			s,
+			s.name,
 		)
 		if err != nil {
 			return err
@@ -286,13 +291,14 @@ func (s *S3FS) PrefetchFile(ctx context.Context, filePath string) error {
 	}
 
 	startLock := time.Now()
-	done, wait := s.ioMerger.Merge(IOMergeKey{
+	done, _ := s.ioMerger.Merge(IOMergeKey{
 		Path: filePath,
 	})
 	if done != nil {
 		defer done()
 	} else {
-		wait()
+		// not wait in prefetch, return
+		return nil
 	}
 	statistic.StatsInfoFromContext(ctx).AddS3FSPrefetchFileIOMergerTimeConsumption(time.Since(startLock))
 
@@ -497,29 +503,14 @@ read_memory_cache:
 		}()
 	}
 
-	stats := statistic.StatsInfoFromContext(ctx)
-	LogEvent(ctx, str_ioMerger_Merge_begin)
-	startLock := time.Now()
-	done, wait := s.ioMerger.Merge(vector.ioMergeKey())
-	if done != nil {
-		stats.AddS3FSReadIOMergerTimeConsumption(time.Since(startLock))
-		LogEvent(ctx, str_ioMerger_Merge_initiate)
-		LogEvent(ctx, str_ioMerger_Merge_end)
-		defer done()
-	} else {
-		LogEvent(ctx, str_ioMerger_Merge_wait)
-		wait()
-		stats.AddS3FSReadIOMergerTimeConsumption(time.Since(startLock))
-		LogEvent(ctx, str_ioMerger_Merge_end)
-		goto read_memory_cache
-	}
-
 	// Record diskIO and netwokIO(un memory IO) resource
+	stats := statistic.StatsInfoFromContext(ctx)
 	ioStart := time.Now()
 	defer func() {
 		stats.AddIOAccessTimeConsumption(time.Since(ioStart))
 	}()
 
+read_disk_cache:
 	if s.diskCache != nil {
 
 		t0 := time.Now()
@@ -561,6 +552,31 @@ read_memory_cache:
 		}
 		if vector.allDone() {
 			return nil
+		}
+	}
+
+	mayReadMemoryCache := vector.Policy&SkipMemoryCacheReads == 0
+	mayReadDiskCache := vector.Policy&SkipDiskCacheReads == 0
+	if mayReadMemoryCache || mayReadDiskCache {
+		// may read caches, merge
+		LogEvent(ctx, str_ioMerger_Merge_begin)
+		startLock := time.Now()
+		done, wait := s.ioMerger.Merge(vector.ioMergeKey())
+		if done != nil {
+			stats.AddS3FSReadIOMergerTimeConsumption(time.Since(startLock))
+			LogEvent(ctx, str_ioMerger_Merge_initiate)
+			LogEvent(ctx, str_ioMerger_Merge_end)
+			defer done()
+		} else {
+			LogEvent(ctx, str_ioMerger_Merge_wait)
+			wait()
+			stats.AddS3FSReadIOMergerTimeConsumption(time.Since(startLock))
+			LogEvent(ctx, str_ioMerger_Merge_end)
+			if mayReadMemoryCache {
+				goto read_memory_cache
+			} else {
+				goto read_disk_cache
+			}
 		}
 	}
 
@@ -905,7 +921,12 @@ func (*S3FS) ETLCompatible() {}
 var _ CachingFileService = new(S3FS)
 
 func (s *S3FS) Close() {
-	s.FlushCache()
+	if s.memCache != nil {
+		s.memCache.Close()
+	}
+	if s.diskCache != nil {
+		s.diskCache.Close()
+	}
 }
 
 func (s *S3FS) FlushCache() {

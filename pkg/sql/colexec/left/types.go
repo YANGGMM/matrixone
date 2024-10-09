@@ -15,6 +15,7 @@
 package left
 
 import (
+	"github.com/matrixorigin/matrixone/pkg/common/hashmap"
 	"github.com/matrixorigin/matrixone/pkg/common/reuse"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
@@ -35,8 +36,8 @@ const (
 )
 
 type container struct {
-	state int
-
+	state         int
+	itr           hashmap.Iterator
 	batchRowCount int64
 	lastrow       int
 	inbat         *batch.Batch
@@ -108,8 +109,7 @@ func (leftJoin *LeftJoin) Release() {
 
 func (leftJoin *LeftJoin) Reset(proc *process.Process, pipelineFailed bool, err error) {
 	ctr := &leftJoin.ctr
-	anal := proc.GetAnalyze(leftJoin.GetIdx(), leftJoin.GetParallelIdx(), leftJoin.GetParallelMajor())
-
+	ctr.itr = nil
 	ctr.resetExecutor()
 	ctr.resetExprExecutor()
 	ctr.cleanHashMap()
@@ -119,11 +119,15 @@ func (leftJoin *LeftJoin) Reset(proc *process.Process, pipelineFailed bool, err 
 	ctr.batchRowCount = 0
 
 	if leftJoin.ProjectList != nil {
-		anal.Alloc(leftJoin.ProjectAllocSize + leftJoin.ctr.maxAllocSize)
+		if leftJoin.OpAnalyzer != nil {
+			leftJoin.OpAnalyzer.Alloc(leftJoin.ProjectAllocSize + leftJoin.ctr.maxAllocSize)
+		}
 		leftJoin.ctr.maxAllocSize = 0
 		leftJoin.ResetProjection(proc)
 	} else {
-		anal.Alloc(leftJoin.ctr.maxAllocSize)
+		if leftJoin.OpAnalyzer != nil {
+			leftJoin.OpAnalyzer.Alloc(leftJoin.ctr.maxAllocSize)
+		}
 		leftJoin.ctr.maxAllocSize = 0
 	}
 }

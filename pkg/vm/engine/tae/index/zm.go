@@ -523,7 +523,7 @@ func (zm ZM) AnyGE(o ZM) (res bool, ok bool) {
 	return
 }
 
-// zm.min >= k
+// zm.max >= k
 func (zm ZM) AnyGEByValue(k []byte) bool {
 	if !zm.IsInited() {
 		return false
@@ -581,6 +581,14 @@ func (zm ZM) AnyBetween(lb, ub ZM) (res bool, ok bool) {
 	res = compute.Compare(zm.GetMaxBuf(), lb.GetMinBuf(), zm.GetType(), zm.GetScale(), lb.GetScale()) >= 0 &&
 		compute.Compare(zm.GetMinBuf(), ub.GetMaxBuf(), zm.GetType(), zm.GetScale(), ub.GetScale()) <= 0
 	return
+}
+
+// no init check
+// no type check
+// max <= v
+func (zm ZM) FastLEValue(v []byte, scale int32) (res bool) {
+	t := zm.GetType()
+	return compute.Compare(zm.GetMaxBuf(), v, t, zm.GetScale(), scale) <= 0
 }
 
 func (zm ZM) FastIntersect(o ZM) (res bool) {
@@ -918,10 +926,10 @@ func (zm ZM) SubVecIn(vec *vector.Vector) (int, int) {
 		col := vector.MustFixedColNoTypeCheck[types.TS](vec)
 		minVal, maxVal := types.DecodeFixed[types.TS](zm.GetMinBuf()), types.DecodeFixed[types.TS](zm.GetMaxBuf())
 		lowerBound := sort.Search(len(col), func(i int) bool {
-			return minVal.LessEq(&col[i])
+			return minVal.LE(&col[i])
 		})
 		upperBound := sort.Search(len(col), func(i int) bool {
-			return maxVal.Less(&col[i])
+			return maxVal.LT(&col[i])
 		})
 		return lowerBound, upperBound
 
@@ -1162,10 +1170,10 @@ func (zm ZM) AnyIn(vec *vector.Vector) bool {
 		col := vector.MustFixedColNoTypeCheck[types.TS](vec)
 		minVal, maxVal := types.DecodeFixed[types.TS](zm.GetMinBuf()), types.DecodeFixed[types.TS](zm.GetMaxBuf())
 		lowerBound := sort.Search(len(col), func(i int) bool {
-			return minVal.LessEq(&col[i])
+			return minVal.LE(&col[i])
 		})
 
-		return lowerBound < len(col) && col[lowerBound].LessEq(&maxVal)
+		return lowerBound < len(col) && col[lowerBound].LE(&maxVal)
 
 	case types.T_uuid:
 		col := vector.MustFixedColNoTypeCheck[types.Uuid](vec)
@@ -1675,9 +1683,13 @@ func UpdateZM(zm ZM, v []byte) {
 	}
 	t := zm.GetType()
 	scale := zm.GetScale()
-	if compute.Compare(v, zm.GetMinBuf(), t, scale, scale) < 0 {
+
+	maxv := zm.GetMaxBuf()
+	minv := zm.GetMinBuf()
+
+	if compute.Compare(v, minv, t, scale, scale) < 0 {
 		zm.updateMinFixed(v)
-	} else if compute.Compare(v, zm.GetMaxBuf(), t, scale, scale) > 0 {
+	} else if compute.Compare(v, maxv, t, scale, scale) > 0 {
 		zm.updateMaxFixed(v)
 	}
 }

@@ -16,9 +16,10 @@ package frontend
 
 import (
 	"context"
-	planPb "github.com/matrixorigin/matrixone/pkg/pb/plan"
 	"math"
 	"sync"
+
+	planPb "github.com/matrixorigin/matrixone/pkg/pb/plan"
 
 	"github.com/matrixorigin/matrixone/pkg/common/mpool"
 	"github.com/matrixorigin/matrixone/pkg/common/runtime"
@@ -122,6 +123,10 @@ func (res *internalExecResult) Value(ctx context.Context, ridx uint64, cidx uint
 	return res.resultSet.GetValue(ctx, ridx, cidx)
 }
 
+func (res *internalExecResult) GetUint64(ctx context.Context, ridx uint64, cidx uint64) (uint64, error) {
+	return res.resultSet.GetUint64(ctx, ridx, cidx)
+}
+
 func (res *internalExecResult) GetString(ctx context.Context, ridx uint64, cidx uint64) (string, error) {
 	return res.resultSet.GetString(ctx, ridx, cidx)
 }
@@ -218,6 +223,8 @@ func (ie *internalExecutor) newCmdSession(ctx context.Context, opts ie.SessionOv
 	//make sure init tasks can see the prev task's data
 	now, _ := runtime.ServiceRuntime(ie.service).Clock().Now()
 	sess.lastCommitTS = now
+
+	sess.initLogger()
 	return sess
 }
 
@@ -239,6 +246,9 @@ type internalProtocol struct {
 	result      *internalExecResult
 	database    string
 	username    string
+}
+
+func (ip *internalProtocol) FreeLoadLocal() {
 }
 
 func (ip *internalProtocol) GetStr(id PropertyID) string {

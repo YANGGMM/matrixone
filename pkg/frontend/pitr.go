@@ -17,6 +17,7 @@ package frontend
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect"
+	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect/mysql"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 	"github.com/matrixorigin/matrixone/pkg/sql/plan"
 )
@@ -56,11 +58,18 @@ var (
 
 	getPitrFormat = `select * from mo_catalog.mo_pitr`
 
+	checkDupPitrFormat = `select pitr_id from mo_catalog.mo_pitr where create_account = %d and obj_id = %d;`
+
 	getSqlForCheckDatabaseFmt = `select dat_id from mo_catalog.mo_database {MO_TS = %d} where datname = '%s';`
 
 	getSqlForCheckTableFmt = `select rel_id from mo_catalog.mo_tables {MO_TS = %d} where reldatabase = '%s' and relname = '%s';`
 
 	getSqlForCheckAccountFmt = `select account_id from mo_catalog.mo_account {MO_TS = %d} where account_name = '%s';`
+
+	getPubInfoWithPitrFormat = `select pub_name, database_name, database_id, table_list, account_list, created_time, update_time, owner, creator, comment from mo_catalog.mo_pubs {MO_TS = %d} where database_name = '%s';`
+
+	// update mo_pitr object id
+	updateMoPitrAccountObjectIdFmt = `update mo_catalog.mo_pitr set obj_id = %d, modified_time = '%s' where account_name = '%s';`
 )
 
 type pitrRecord struct {
@@ -131,6 +140,43 @@ func getSqlForCheckAccountWithPitr(ctx context.Context, ts int64, accountName st
 	return fmt.Sprintf(getSqlForCheckAccountFmt, ts, accountName), nil
 }
 
+func getSqlForCheckDupPitrFormat(accountId, objId uint64) string {
+	return fmt.Sprintf(checkDupPitrFormat, accountId, objId)
+}
+
+func getPubInfoWithPitr(ts int64, dbName string) string {
+	return fmt.Sprintf(getPubInfoWithPitrFormat, ts, dbName)
+}
+
+func getSqlForUpdateMoPitrAccountObjectId(accountName string, objId uint64, modifiedTime string) string {
+	return fmt.Sprintf(updateMoPitrAccountObjectIdFmt, objId, modifiedTime, accountName)
+}
+
+func checkPitrDup(ctx context.Context, bh BackgroundExec, createAccountId, objId uint64) (bool, error) {
+	sql := getSqlForCheckDupPitrFormat(createAccountId, objId)
+
+	var newCtx = ctx
+	if createAccountId != sysAccountID {
+		newCtx = defines.AttachAccountId(newCtx, sysAccountID)
+	}
+
+	bh.ClearExecResultSet()
+	err := bh.Exec(newCtx, sql)
+	if err != nil {
+		return false, err
+	}
+
+	erArray, err := getResultSet(newCtx, bh)
+	if err != nil {
+		return false, err
+	}
+
+	if execResultArrayHasData(erArray) {
+		return true, nil
+	}
+	return false, nil
+}
+
 func checkPitrExistOrNot(ctx context.Context, bh BackgroundExec, pitrName string, accountId uint64) (bool, error) {
 	var sql string
 	var erArray []ExecResult
@@ -143,6 +189,7 @@ func checkPitrExistOrNot(ctx context.Context, bh BackgroundExec, pitrName string
 	if accountId != sysAccountID {
 		newCtx = defines.AttachAccountId(newCtx, sysAccountID)
 	}
+
 	bh.ClearExecResultSet()
 	err = bh.Exec(newCtx, sql)
 	if err != nil {
@@ -170,6 +217,7 @@ func doCreatePitr(ctx context.Context, ses *Session, stmt *tree.CreatePitr) erro
 	var databaseName string
 	var tableName string
 	var sql string
+	var isDup bool
 
 	bh := ses.GetBackgroundExec(ctx)
 	defer bh.Close()
@@ -241,6 +289,13 @@ func doCreatePitr(ctx context.Context, ses *Session, stmt *tree.CreatePitr) erro
 
 	switch pitrLevel {
 	case tree.PITRLEVELCLUSTER:
+		isDup, err = checkPitrDup(ctx, bh, uint64(createAcc), math.MaxUint64)
+		if err != nil {
+			return err
+		}
+		if isDup {
+			return moerr.NewInternalError(ctx, "cluster level pitr already exists")
+		}
 		sql, err = getSqlForCreatePitr(
 			ctx,
 			newUUid.String(),
@@ -253,7 +308,7 @@ func doCreatePitr(ctx context.Context, ses *Session, stmt *tree.CreatePitr) erro
 			accountName,
 			databaseName,
 			tableName,
-			0,
+			math.MaxUint64,
 			uint8(pitrVal),
 			pitrUnit)
 		if err != nil {
@@ -299,6 +354,14 @@ func doCreatePitr(ctx context.Context, ses *Session, stmt *tree.CreatePitr) erro
 				return rntErr
 			}
 
+			isDup, err = checkPitrDup(ctx, bh, uint64(createAcc), accountId)
+			if err != nil {
+				return err
+			}
+			if isDup {
+				return moerr.NewInternalError(ctx, fmt.Sprintf("account `%s` already has a pitr", pitrForAccount))
+			}
+
 			sql, err = getSqlForCreatePitr(
 				ctx,
 				newUUid.String(),
@@ -319,6 +382,13 @@ func doCreatePitr(ctx context.Context, ses *Session, stmt *tree.CreatePitr) erro
 			}
 		} else {
 			// create pitr for current account
+			isDup, err = checkPitrDup(ctx, bh, uint64(createAcc), uint64(createAcc))
+			if err != nil {
+				return err
+			}
+			if isDup {
+				return moerr.NewInternalError(ctx, fmt.Sprintf("account `%s` already has a pitr", currentAccount))
+			}
 			sql, err = getSqlForCreatePitr(
 				ctx,
 				newUUid.String(),
@@ -342,6 +412,9 @@ func doCreatePitr(ctx context.Context, ses *Session, stmt *tree.CreatePitr) erro
 	case tree.PITRLEVELDATABASE:
 		// create database level pitr for current account
 		databaseName = string(stmt.DatabaseName)
+		if len(databaseName) > 0 && needSkipDb(databaseName) {
+			return moerr.NewInternalError(ctx, fmt.Sprintf("can not create pitr for current database %s", databaseName))
+		}
 		getDatabaseIdFunc := func(dbName string) (dbId uint64, rtnErr error) {
 			var erArray []ExecResult
 			sql, rtnErr = getSqlForCheckDatabase(ctx, dbName)
@@ -376,6 +449,14 @@ func doCreatePitr(ctx context.Context, ses *Session, stmt *tree.CreatePitr) erro
 			return rtnErr
 		}
 
+		isDup, err = checkPitrDup(ctx, bh, uint64(createAcc), dbId)
+		if err != nil {
+			return err
+		}
+		if isDup {
+			return moerr.NewInternalError(ctx, fmt.Sprintf("database `%s` already has a pitr", databaseName))
+		}
+
 		sql, err = getSqlForCreatePitr(
 			ctx,
 			newUUid.String(),
@@ -400,6 +481,9 @@ func doCreatePitr(ctx context.Context, ses *Session, stmt *tree.CreatePitr) erro
 		// create table level pitr for current account
 		databaseName = string(stmt.DatabaseName)
 		tableName = string(stmt.TableName)
+		if len(databaseName) > 0 && needSkipDb(databaseName) {
+			return moerr.NewInternalError(ctx, fmt.Sprintf("can not create pitr for current table %s.%s", databaseName, tableName))
+		}
 		getTableIdFunc := func(dbName, tblName string) (tblId uint64, rtnErr error) {
 			var erArray []ExecResult
 			sql, rtnErr = getSqlForCheckDatabaseTable(ctx, dbName, tblName)
@@ -425,13 +509,21 @@ func doCreatePitr(ctx context.Context, ses *Session, stmt *tree.CreatePitr) erro
 					}
 				}
 			} else {
-				return 0, moerr.NewInternalErrorf(ctx, "table %s does not exist", tblName)
+				return 0, moerr.NewInternalErrorf(ctx, "table %s.%s does not exist", dbName, tblName)
 			}
 			return tblId, rtnErr
 		}
 		tblId, rtnErr := getTableIdFunc(databaseName, tableName)
 		if rtnErr != nil {
 			return rtnErr
+		}
+
+		isDup, err = checkPitrDup(ctx, bh, uint64(createAcc), tblId)
+		if err != nil {
+			return err
+		}
+		if isDup {
+			return moerr.NewInternalError(ctx, fmt.Sprintf("database `%s` table `%s` already has a pitr", databaseName, tableName))
 		}
 
 		sql, err = getSqlForCreatePitr(
@@ -633,7 +725,6 @@ func doRestorePitr(ctx context.Context, ses *Session, stmt *tree.RestorePitr) (e
 	// check if the database can be restore
 	if len(dbName) != 0 && needSkipDb(dbName) {
 		return moerr.NewInternalErrorf(ctx, "database %s can not be restore", dbName)
-
 	}
 
 	// get pitr Record
@@ -665,7 +756,7 @@ func doRestorePitr(ctx context.Context, ses *Session, stmt *tree.RestorePitr) (e
 				return rtnErr
 			}
 			if !accountExist {
-				return moerr.NewInternalErrorf(ctx, "account %s does not exist at timestamp %d", tenantInfo.GetTenant(), ts)
+				return moerr.NewInternalErrorf(ctx, "account `%s` does not exists at timestamp: %v", tenantInfo.GetTenant(), nanoTimeFormat(ts))
 			}
 			// mock snapshot
 			var snapshotName string
@@ -746,7 +837,7 @@ func doRestorePitr(ctx context.Context, ses *Session, stmt *tree.RestorePitr) (e
 		return err
 	}
 	if !accountExist {
-		return moerr.NewInternalErrorf(ctx, "account %s does not exist at timestamp %d", tenantInfo.GetTenant(), ts)
+		return moerr.NewInternalErrorf(ctx, "account `%s` does not exists at timestamp: %v", tenantInfo.GetTenant(), nanoTimeFormat(ts))
 	}
 
 	//drop foreign key related tables first
@@ -912,7 +1003,7 @@ func restoreToDatabaseWithPitr(
 		return err
 	}
 	if !databaseExist {
-		return moerr.NewInternalErrorf(ctx, "database '%s' not exists at timestamp %d", dbName, ts)
+		return moerr.NewInternalErrorf(ctx, "database '%s' does not exists at timestamp: %v", dbName, nanoTimeFormat(ts))
 	}
 
 	return restoreToDatabaseOrTableWithPitr(
@@ -947,7 +1038,7 @@ func restoreToTableWithPitr(
 		return err
 	}
 	if !TableExist {
-		return moerr.NewInternalErrorf(ctx, "database '%s' table '%s' not exists at timestamp %d", dbName, tblName, ts)
+		return moerr.NewInternalErrorf(ctx, "database '%s' table '%s' does not exists at timestamp: %v", dbName, tblName, nanoTimeFormat(ts))
 	}
 	return restoreToDatabaseOrTableWithPitr(
 		ctx,
@@ -1034,7 +1125,7 @@ func restoreToDatabaseOrTableWithPitr(
 	// restore publication record
 	if !restoreToTbl {
 		getLogger(sid).Info(fmt.Sprintf("[%s] start to create pub: %v", pitrName, dbName))
-		if err = createPub(ctx, sid, bh, pitrName, dbName, curAccount); err != nil {
+		if err = createPubByPitr(ctx, sid, bh, pitrName, dbName, curAccount, ts); err != nil {
 			return
 		}
 	}
@@ -1546,7 +1637,21 @@ func nanoTimeFormat(ts int64) string {
 // @param pitrRecord: the pitr record
 // if the ts less than the duration of the pitr
 // then return an error
+// if the ts bigger than now(), then return an error
 func checkPitrInValidDurtion(ts int64, pitrRecord *pitrRecord) (err error) {
+	// if the timestamp time less than the pitrRecord modified time, then return error
+	// modified time is utc time string, ts is coverted to utc too
+	modifiedTimeStr := pitrRecord.modifiedTime
+	// parse modifiedTimeStr to utc time
+	t, err := time.ParseInLocation("2006-01-02 15:04:05", modifiedTimeStr, time.UTC)
+	if err != nil {
+		return
+	}
+	utcNano := t.UTC().UnixNano()
+	if ts <= utcNano {
+		moerr.NewInternalErrorNoCtxf("input timestamp %v is less than the pitr valid time %v", nanoTimeFormat(ts), nanoTimeFormat(utcNano))
+	}
+
 	// use utc time now sub pitr during time get the minest time
 	// is ts time less than the minest time, then return error
 	pitrValue := pitrRecord.pitrValue
@@ -1558,7 +1663,12 @@ func checkPitrInValidDurtion(ts int64, pitrRecord *pitrRecord) (err error) {
 	}
 
 	if ts < minTs.UnixNano() {
-		return moerr.NewInternalErrorNoCtxf("ts %v is less than the pitr range minest time %v", nanoTimeFormat(ts), nanoTimeFormat(minTs.UnixNano()))
+		return moerr.NewInternalErrorNoCtxf("input timestamp %v is less than the pitr range minest timestamp %v", nanoTimeFormat(ts), nanoTimeFormat(minTs.UnixNano()))
+	}
+
+	// if the ts bigger than now(), then return an error
+	if ts > time.Now().UTC().UnixNano() {
+		return moerr.NewInternalErrorNoCtxf("input timestamp %v is bigger than now timestamp %v", nanoTimeFormat(ts), nanoTimeFormat(time.Now().UTC().UnixNano()))
 	}
 
 	return
@@ -1895,4 +2005,71 @@ func getCreateDatabaseSqlInPitr(ctx context.Context,
 		return "", moerr.NewBadDB(ctx, dbName)
 	}
 	return colsList[0][1], nil
+}
+
+// createPubByPitr create pub after the database is created by pitr
+func createPubByPitr(
+	ctx context.Context,
+	sid string,
+	bh BackgroundExec,
+	pitrName,
+	dbName string,
+	toAccountId uint32,
+	ts int64) (err error) {
+	// read pub info from mo_pubs
+	sql := getPubInfoWithPitr(ts, dbName)
+	bh.ClearExecResultSet()
+	getLogger(sid).Info(fmt.Sprintf("[%s] create pub: get pub info sql: %s", pitrName, sql))
+
+	if err = bh.Exec(ctx, sql); err != nil {
+		return
+	}
+
+	erArray, err := getResultSet(ctx, bh)
+	if err != nil {
+		return
+	}
+	pubInfos, err := extractPubInfosFromExecResult(ctx, erArray)
+	if err != nil {
+		return err
+	}
+
+	// restore pub to toAccount
+	var ast []tree.Statement
+	defer func() {
+		for _, s := range ast {
+			s.Free()
+		}
+	}()
+
+	for _, pubInfo := range pubInfos {
+		toCtx := defines.AttachAccount(ctx, toAccountId, pubInfo.Owner, pubInfo.Creator)
+		if ast, err = mysql.Parse(toCtx, pubInfo.GetCreateSql(), 1); err != nil {
+			return
+		}
+		getLogger(sid).Info(fmt.Sprintf("[%s] create pub: create pub sql: %s", pitrName, pubInfo.GetCreateSql()))
+
+		if err = createPublication(toCtx, bh, ast[0].(*tree.CreatePublication)); err != nil {
+			return
+		}
+	}
+	return
+}
+
+// updatePitrObjectId
+// if mo_pitr table contains the same account name create account, then update the obj_id of mo_pitr
+// otherwise, skip it
+func updatePitrObjectId(ctx context.Context,
+	bh BackgroundExec,
+	accountName string,
+	objId uint64) (err error) {
+	sql := getSqlForUpdateMoPitrAccountObjectId(
+		accountName,
+		objId,
+		types.CurrentTimestamp().String2(time.UTC, 0))
+	err = bh.Exec(ctx, sql)
+	if err != nil {
+		return
+	}
+	return
 }

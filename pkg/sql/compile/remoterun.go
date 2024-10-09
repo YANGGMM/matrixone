@@ -16,19 +16,11 @@ package compile
 
 import (
 	"fmt"
+	"github.com/matrixorigin/matrixone/pkg/vm/engine/engine_util"
 	"unsafe"
-
-	"github.com/matrixorigin/matrixone/pkg/sql/colexec/hashbuild"
-	"github.com/matrixorigin/matrixone/pkg/sql/colexec/indexbuild"
-	"github.com/matrixorigin/matrixone/pkg/sql/colexec/productl2"
-	"github.com/matrixorigin/matrixone/pkg/sql/colexec/shufflebuild"
-	"github.com/matrixorigin/matrixone/pkg/sql/colexec/table_scan"
-	"github.com/matrixorigin/matrixone/pkg/sql/colexec/unionall"
-	"github.com/matrixorigin/matrixone/pkg/vm/engine/disttae"
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/common/mpool"
-	"github.com/matrixorigin/matrixone/pkg/common/reuse"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/pb/pipeline"
@@ -36,6 +28,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/aggexec"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/anti"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/apply"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/connector"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/deletion"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/dispatch"
@@ -43,6 +36,8 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/filter"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/fuzzyfilter"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/group"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/hashbuild"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/indexbuild"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/indexjoin"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/insert"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/intersect"
@@ -67,6 +62,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/preinsertsecondaryindex"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/preinsertunique"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/product"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/productl2"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/projection"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/right"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/rightanti"
@@ -74,10 +70,13 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/sample"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/semi"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/shuffle"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/shufflebuild"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/single"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/source"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/table_function"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/table_scan"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/top"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec/unionall"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec/value_scan"
 	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
 	"github.com/matrixorigin/matrixone/pkg/vm"
@@ -110,7 +109,7 @@ func decodeScope(data []byte, proc *process.Process, isRemote bool, eng engine.E
 		regs:   make(map[*process.WaitRegister]int32),
 	}
 	ctx.root = ctx
-	s, err := generateScope(proc, p, ctx, proc.Base.AnalInfos, isRemote)
+	s, err := generateScope(proc, p, ctx, isRemote)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +196,7 @@ func generatePipeline(s *Scope, ctx *scopeContext, ctxId int32) (*pipeline.Pipel
 	p.ChildrenCount = int32(len(s.Proc.Reg.MergeReceivers))
 	{
 		for i := range s.Proc.Reg.MergeReceivers {
-			p.ChannelBufferSize = append(p.ChannelBufferSize, int32(cap(s.Proc.Reg.MergeReceivers[i].Ch)))
+			p.ChannelBufferSize = append(p.ChannelBufferSize, int32(cap(s.Proc.Reg.MergeReceivers[i].Ch2)))
 			p.NilBatchCnt = append(p.NilBatchCnt, int32(s.Proc.Reg.MergeReceivers[i].NilBatchCnt))
 			ctx.regs[s.Proc.Reg.MergeReceivers[i]] = int32(i)
 		}
@@ -293,8 +292,7 @@ func convertScopeRemoteReceivInfo(s *Scope) (ret []*pipeline.UuidToRegIdx) {
 }
 
 // generateScope generate a scope from scope context and pipeline.
-func generateScope(proc *process.Process, p *pipeline.Pipeline, ctx *scopeContext,
-	analNodes []*process.AnalyzeInfo, isRemote bool) (*Scope, error) {
+func generateScope(proc *process.Process, p *pipeline.Pipeline, ctx *scopeContext, isRemote bool) (*Scope, error) {
 	var err error
 	var s *Scope
 	defer func() {
@@ -338,7 +336,7 @@ func generateScope(proc *process.Process, p *pipeline.Pipeline, ctx *scopeContex
 		bs := []byte(p.Node.Payload)
 		var relData engine.RelData
 		if len(bs) > 0 {
-			rd, err := disttae.UnmarshalRelationData(bs)
+			rd, err := engine_util.UnmarshalRelationData(bs)
 			if err != nil {
 				return nil, err
 			}
@@ -361,7 +359,7 @@ func generateScope(proc *process.Process, p *pipeline.Pipeline, ctx *scopeContex
 			id:     p.Children[i].PipelineId,
 			regs:   make(map[*process.WaitRegister]int32),
 		}
-		if s.PreScopes[i], err = generateScope(s.Proc, p.Children[i], ctx.children[i], analNodes, isRemote); err != nil {
+		if s.PreScopes[i], err = generateScope(s.Proc, p.Children[i], ctx.children[i], isRemote); err != nil {
 			return nil, err
 		}
 	}
@@ -460,7 +458,6 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 		}
 	case *lockop.LockOp:
 		in.LockOp = &pipeline.LockOp{
-			Block:   t.Block(),
 			Targets: t.CopyToPipelineTarget(),
 		}
 	case *preinsertunique.PreInsertUnique:
@@ -490,12 +487,12 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 		in.Shuffle.ShuffleType = t.ShuffleType
 		in.Shuffle.ShuffleColMax = t.ShuffleColMax
 		in.Shuffle.ShuffleColMin = t.ShuffleColMin
-		in.Shuffle.AliveRegCnt = t.AliveRegCnt
+		in.Shuffle.AliveRegCnt = t.BucketNum
 		in.Shuffle.ShuffleRangesUint64 = t.ShuffleRangeUint64
 		in.Shuffle.ShuffleRangesInt64 = t.ShuffleRangeInt64
 		in.Shuffle.RuntimeFilterSpec = t.RuntimeFilterSpec
 	case *dispatch.Dispatch:
-		in.Dispatch = &pipeline.Dispatch{IsSink: t.IsSink, ShuffleType: t.ShuffleType, RecSink: t.RecSink, FuncId: int32(t.FuncId)}
+		in.Dispatch = &pipeline.Dispatch{IsSink: t.IsSink, ShuffleType: t.ShuffleType, RecSink: t.RecSink, RecCte: t.RecCTE, FuncId: int32(t.FuncId)}
 		in.Dispatch.ShuffleRegIdxLocal = make([]int32, len(t.ShuffleRegIdxLocal))
 		for i := range t.ShuffleRegIdxLocal {
 			in.Dispatch.ShuffleRegIdxLocal[i] = int32(t.ShuffleRegIdxLocal[i])
@@ -528,6 +525,7 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 		in.Agg = &pipeline.Group{
 			PreAllocSize: t.PreAllocSize,
 			NeedEval:     t.NeedEval,
+			GroupingFlag: t.GroupingFlag,
 			Exprs:        t.Exprs,
 			Aggs:         convertToPipelineAggregates(t.Aggs),
 		}
@@ -644,10 +642,7 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 	case *projection.Projection:
 		in.ProjectList = t.ProjectList
 	case *filter.Filter:
-		in.Filter = t.GetExeExpr()
-		if in.Filter == nil {
-			in.Filter = t.E
-		}
+		in.Filter = t.E
 	case *semi.SemiJoin:
 		in.SemiJoin = &pipeline.SemiJoin{
 			Result:                 t.Result,
@@ -808,6 +803,22 @@ func convertToPipelineInstruction(op vm.Operator, proc *process.Process, ctx *sc
 		in.IndexBuild = &pipeline.Indexbuild{
 			RuntimeFilterSpec: t.RuntimeFilterSpec,
 		}
+	case *apply.Apply:
+		relList, colList := getRelColList(t.Result)
+		in.Apply = &pipeline.Apply{
+			ApplyType: int32(t.ApplyType),
+			RelList:   relList,
+			ColList:   colList,
+			Types:     convertToPlanTypes(t.Typs),
+		}
+		in.ProjectList = t.ProjectList
+		in.TableFunction = &pipeline.TableFunction{
+			Attrs:  t.TableFunction.Attrs,
+			Rets:   t.TableFunction.Rets,
+			Args:   t.TableFunction.Args,
+			Params: t.TableFunction.Params,
+			Name:   t.TableFunction.FuncName,
+		}
 	default:
 		return -1, nil, moerr.NewInternalErrorNoCtx(fmt.Sprintf("unexpected operator: %v", op.OpType()))
 	}
@@ -866,7 +877,6 @@ func convertToVmOperator(opr *pipeline.Instruction, ctx *scopeContext, eng engin
 	case vm.LockOp:
 		t := opr.GetLockOp()
 		lockArg := lockop.NewArgumentByEngine(eng)
-		lockArg.SetBlock(t.Block)
 		for _, target := range t.Targets {
 			typ := plan2.MakeTypeByPlan2Type(target.PrimaryColTyp)
 			lockArg.AddLockTarget(target.GetTableId(), target.GetPrimaryColIdxInBat(), typ, target.GetRefreshTsIdxInBat())
@@ -928,7 +938,7 @@ func convertToVmOperator(opr *pipeline.Instruction, ctx *scopeContext, eng engin
 		arg.ShuffleType = t.ShuffleType
 		arg.ShuffleColMin = t.ShuffleColMin
 		arg.ShuffleColMax = t.ShuffleColMax
-		arg.AliveRegCnt = t.AliveRegCnt
+		arg.BucketNum = t.AliveRegCnt
 		arg.ShuffleRangeInt64 = t.ShuffleRangesInt64
 		arg.ShuffleRangeUint64 = t.ShuffleRangesUint64
 		arg.RuntimeFilterSpec = t.RuntimeFilterSpec
@@ -965,6 +975,7 @@ func convertToVmOperator(opr *pipeline.Instruction, ctx *scopeContext, eng engin
 		arg := dispatch.NewArgument()
 		arg.IsSink = t.IsSink
 		arg.RecSink = t.RecSink
+		arg.RecCTE = t.RecCte
 		arg.FuncId = int(t.FuncId)
 		arg.LocalRegs = regs
 		arg.RemoteRegs = rrs
@@ -977,6 +988,7 @@ func convertToVmOperator(opr *pipeline.Instruction, ctx *scopeContext, eng engin
 		arg := group.NewArgument()
 		arg.PreAllocSize = t.PreAllocSize
 		arg.NeedEval = t.NeedEval
+		arg.GroupingFlag = t.GroupingFlag
 		arg.Exprs = t.Exprs
 		arg.Aggs = convertToAggregates(t.Aggs)
 		arg.ProjectList = opr.ProjectList
@@ -1223,14 +1235,13 @@ func convertToVmOperator(opr *pipeline.Instruction, ctx *scopeContext, eng engin
 		op = table_scan.NewArgument().WithTypes(opr.TableScan.Types)
 		op.(*table_scan.TableScan).ProjectList = opr.ProjectList
 	case vm.ValueScan:
-		op = value_scan.NewArgument()
+		op = value_scan.NewValueScanFromProcess()
 		op.(*value_scan.ValueScan).ProjectList = opr.ProjectList
 		if len(opr.ValueScan.BatchBlock) > 0 {
-			bat := new(batch.Batch)
+			bat := batch.NewOffHeapEmpty()
 			if err := types.Decode([]byte(opr.ValueScan.BatchBlock), bat); err != nil {
 				return nil, err
 			}
-			bat.Cnt = 1
 			op.(*value_scan.ValueScan).Batchs = append(op.(*value_scan.ValueScan).Batchs, bat)
 		}
 	case vm.UnionAll:
@@ -1261,6 +1272,20 @@ func convertToVmOperator(opr *pipeline.Instruction, ctx *scopeContext, eng engin
 	case vm.IndexBuild:
 		arg := indexbuild.NewArgument()
 		arg.RuntimeFilterSpec = opr.GetIndexBuild().RuntimeFilterSpec
+		op = arg
+	case vm.Apply:
+		arg := apply.NewArgument()
+		t := opr.GetApply()
+		arg.ApplyType = int(t.ApplyType)
+		arg.Result = convertToResultPos(t.RelList, t.ColList)
+		arg.Typs = convertToTypes(t.Types)
+		arg.ProjectList = opr.ProjectList
+		arg.TableFunction = table_function.NewArgument()
+		arg.TableFunction.Attrs = opr.TableFunction.Attrs
+		arg.TableFunction.Rets = opr.TableFunction.Rets
+		arg.TableFunction.Args = opr.TableFunction.Args
+		arg.TableFunction.FuncName = opr.TableFunction.Name
+		arg.TableFunction.Params = opr.TableFunction.Params
 		op = arg
 	default:
 		return op, moerr.NewInternalErrorNoCtx(fmt.Sprintf("unexpected operator: %v", opr.Op))
@@ -1342,37 +1367,9 @@ func convertToResultPos(relList, colList []int32) []colexec.ResultPos {
 	return res
 }
 
-func convertToPlanAnalyzeInfo(info *process.AnalyzeInfo) *plan.AnalyzeInfo {
-	a := &plan.AnalyzeInfo{
-		InputBlocks:      info.InputBlocks,
-		InputRows:        info.InputRows,
-		OutputRows:       info.OutputRows,
-		InputSize:        info.InputSize,
-		OutputSize:       info.OutputSize,
-		TimeConsumed:     info.TimeConsumed,
-		MemorySize:       info.MemorySize,
-		WaitTimeConsumed: info.WaitTimeConsumed,
-		DiskIO:           info.DiskIO,
-		S3IOByte:         info.S3IOByte,
-		S3IOInputCount:   info.S3IOInputCount,
-		S3IOOutputCount:  info.S3IOOutputCount,
-		NetworkIO:        info.NetworkIO,
-		ScanTime:         info.ScanTime,
-		InsertTime:       info.InsertTime,
-	}
-	info.DeepCopyArray(a)
-	// there are 3 situations to release analyzeInfo
-	// 1 is free analyzeInfo of Local CN when release analyze
-	// 2 is free analyzeInfo of remote CN before transfer back
-	// 3 is free analyzeInfo of remote CN when errors happen before transfer back
-	// this is situation 2
-	reuse.Free[process.AnalyzeInfo](info, nil)
-	return a
-}
-
 // func decodeBatch(proc *process.Process, data []byte) (*batch.Batch, error) {
 func decodeBatch(mp *mpool.MPool, data []byte) (*batch.Batch, error) {
-	bat := new(batch.Batch)
+	bat := batch.NewOffHeapEmpty()
 	if err := bat.UnmarshalBinaryWithAnyMp(data, mp); err != nil {
 		bat.Clean(mp)
 		return nil, err

@@ -15,6 +15,7 @@
 package frontend
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -52,6 +53,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
 	"github.com/matrixorigin/matrixone/pkg/sql/compile"
+	"github.com/matrixorigin/matrixone/pkg/sql/models"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect/mysql"
@@ -962,6 +964,7 @@ func doExplainStmt(reqCtx context.Context, ses *Session, stmt *tree.ExplainStmt)
 	if err != nil {
 		return err
 	}
+	es.CmpContext = ses.GetTxnCompileCtx()
 
 	//get query optimizer and execute Optimize
 	exPlan, err := buildPlan(reqCtx, ses, ses.GetTxnCompileCtx(), stmt.Statement)
@@ -1821,6 +1824,41 @@ func buildMoExplainQuery(execCtx *ExecCtx, explainColName string, buffer *explai
 	return err
 }
 
+func buildMoExplainPhyPlan(execCtx *ExecCtx, explainColName string, reader *bufio.Reader, session *Session, fill outputCallBackFunc) error {
+	bat := batch.New(true, []string{explainColName})
+	vs := make([][]byte, 0)
+	count := 0
+	for {
+		line, err := reader.ReadString('\n')
+		if err == io.EOF && len(line) > 0 {
+			vs = append(vs, []byte(strings.TrimSuffix(line, "\n")))
+			count++
+			break
+		}
+		if err != nil {
+			return moerr.NewInvalidInputf(execCtx.reqCtx, "Error when read explain phyplan buffer: %s", err.Error())
+		}
+
+		vs = append(vs, []byte(strings.TrimSuffix(line, "\n")))
+		count++
+	}
+
+	vs = vs[:count]
+	vec := vector.NewVec(types.T_varchar.ToType())
+	defer vec.Free(session.GetMemPool())
+	vector.AppendBytesList(vec, vs, nil, session.GetMemPool())
+	bat.Vecs[0] = vec
+	bat.SetRowCount(count)
+
+	err := fill(session, execCtx, bat)
+	if err != nil {
+		return err
+	}
+	// to trigger save result meta
+	err = fill(session, execCtx, nil)
+	return err
+}
+
 func buildPlan(reqCtx context.Context, ses FeSession, ctx plan2.CompilerContext, stmt tree.Statement) (*plan2.Plan, error) {
 	var ret *plan2.Plan
 	var err error
@@ -1894,7 +1932,7 @@ func buildPlan(reqCtx context.Context, ses FeSession, ctx plan2.CompilerContext,
 		*tree.Update, *tree.Delete, *tree.Insert,
 		*tree.ShowDatabases, *tree.ShowTables, *tree.ShowSequences, *tree.ShowColumns, *tree.ShowColumnNumber, *tree.ShowTableNumber,
 		*tree.ShowCreateDatabase, *tree.ShowCreateTable, *tree.ShowIndex,
-		*tree.ExplainStmt, *tree.ExplainAnalyze:
+		*tree.ExplainStmt, *tree.ExplainAnalyze, *tree.ExplainPhyPlan:
 		opt := plan2.NewBaseOptimizer(ctx)
 		optimized, err := opt.Optimize(stmt, isPrepareStmt)
 		if err != nil {
@@ -2151,10 +2189,16 @@ func canExecuteStatementInUncommittedTransaction(reqCtx context.Context, ses FeS
 	return nil
 }
 
-func readThenWrite(ses FeSession, execCtx *ExecCtx, param *tree.ExternParam, writer *io.PipeWriter, mysqlRrWr MysqlRrWr, skipWrite bool, epoch uint64) (bool, time.Duration, time.Duration, error) {
+func readThenWrite(ses FeSession, execCtx *ExecCtx, param *tree.ExternParam, writer *io.PipeWriter, mysqlRrWr MysqlRrWr, skipWrite bool, epoch uint64) (_ bool, _ time.Duration, _ time.Duration, err error) {
 	var readTime, writeTime time.Duration
+	var payload []byte
 	readStart := time.Now()
-	payload, err := mysqlRrWr.ReadLoadLocalPacket()
+	defer func() {
+		if err != nil {
+			mysqlRrWr.FreeLoadLocal()
+		}
+	}()
+	payload, err = mysqlRrWr.ReadLoadLocalPacket()
 	if err != nil {
 		if errors.Is(err, errorInvalidLength0) {
 			return skipWrite, readTime, writeTime, err
@@ -2204,6 +2248,8 @@ func processLoadLocal(ses FeSession, execCtx *ExecCtx, param *tree.ExternParam, 
 		if err == nil {
 			err = err2
 		}
+		//free load local buffer anyway
+		mysqlRrWr.FreeLoadLocal()
 	}()
 	err = plan2.InitInfileParam(param)
 	if err != nil {
@@ -2593,6 +2639,8 @@ func executeStmt(ses *Session,
 		}
 	case *tree.ExplainAnalyze:
 		ses.SetData(nil)
+	case *tree.ExplainPhyPlan:
+		ses.SetData(nil)
 	case *tree.ShowTableStatus:
 		ses.SetShowStmtType(ShowTableStatus)
 		ses.SetData(nil)
@@ -2609,11 +2657,6 @@ func executeStmt(ses *Session,
 		}
 	}
 
-	defer func() {
-		// Serialize the execution plan as json
-		_ = execCtx.cw.RecordExecPlan(execCtx.reqCtx)
-	}()
-
 	cmpBegin = time.Now()
 
 	ses.EnterFPrint(FPExecStmtBeforeCompile)
@@ -2624,6 +2667,15 @@ func executeStmt(ses *Session,
 
 	defer func() {
 		if c, ok := ret.(*compile.Compile); ok {
+			var phyPlan *models.PhyPlan
+			analyzeModule := c.GetAnalyzeModule()
+			if analyzeModule != nil {
+				phyPlan = analyzeModule.GetPhyPlan()
+				execCtx.cw.SetExplainBuffer(analyzeModule.GetExplainPhyBuffer())
+			}
+
+			// Serialize the execution plan as json
+			_ = execCtx.cw.RecordExecPlan(execCtx.reqCtx, phyPlan)
 			c.Release()
 		}
 	}()
@@ -2686,6 +2738,10 @@ func doComQuery(ses *Session, execCtx *ExecCtx, input *UserInput) (retErr error)
 	resper := ses.GetResponser()
 	ses.SetSql(input.getSql())
 	input.genHash()
+	version := ses.GetCreateVersion()
+	if len(version) == 0 {
+		version = serverVersion.Load().(string)
+	}
 
 	sqlLen := len(input.getSql())
 	if sqlLen != 0 {
@@ -2723,7 +2779,7 @@ func doComQuery(ses *Session, execCtx *ExecCtx, input *UserInput) (retErr error)
 		Host:                 getGlobalPu().SV.Host,
 		ConnectionID:         uint64(resper.GetU32(CONNID)),
 		Database:             ses.GetDatabaseName(),
-		Version:              makeServerVersion(getGlobalPu(), serverVersion.Load().(string)),
+		Version:              makeServerVersion(getGlobalPu(), version),
 		TimeZone:             ses.GetTimeZone(),
 		StorageEngine:        getGlobalPu().StorageEngine,
 		LastInsertID:         ses.GetLastInsertID(),
@@ -3259,7 +3315,7 @@ func convertMysqlTextTypeToBlobType(col *MysqlColumn) {
 func buildErrorJsonPlan(buffer *bytes.Buffer, uuid uuid.UUID, errcode uint16, msg string) []byte {
 	var bytes [36]byte
 	util.EncodeUUIDHex(bytes[:], uuid[:])
-	explainData := explain.ExplainData{
+	explainData := models.ExplainData{
 		Code:    errcode,
 		Message: msg,
 		Uuid:    util.UnsafeBytesToString(bytes[:]),
@@ -3277,8 +3333,8 @@ type jsonPlanHandler struct {
 	buffer     *bytes.Buffer
 }
 
-func NewJsonPlanHandler(ctx context.Context, stmt *motrace.StatementInfo, ses FeSession, plan *plan2.Plan, opts ...marshalPlanOptions) *jsonPlanHandler {
-	h := NewMarshalPlanHandler(ctx, stmt, plan, opts...)
+func NewJsonPlanHandler(ctx context.Context, stmt *motrace.StatementInfo, ses FeSession, plan *plan2.Plan, phyPlan *models.PhyPlan, opts ...marshalPlanOptions) *jsonPlanHandler {
+	h := NewMarshalPlanHandler(ctx, stmt, plan, phyPlan, opts...)
 	jsonBytes := h.Marshal(ctx)
 	statsBytes, stats := h.Stats(ctx, ses)
 	return &jsonPlanHandler{
@@ -3319,7 +3375,7 @@ func WithWaitActiveCost(cost time.Duration) marshalPlanOptions {
 
 type marshalPlanHandler struct {
 	query       *plan.Query
-	marshalPlan *explain.ExplainData
+	marshalPlan *models.ExplainData
 	stmt        *motrace.StatementInfo
 	uuid        uuid.UUID
 	buffer      *bytes.Buffer
@@ -3327,7 +3383,7 @@ type marshalPlanHandler struct {
 	marshalPlanConfig
 }
 
-func NewMarshalPlanHandler(ctx context.Context, stmt *motrace.StatementInfo, plan *plan2.Plan, opts ...marshalPlanOptions) *marshalPlanHandler {
+func NewMarshalPlanHandler(ctx context.Context, stmt *motrace.StatementInfo, plan *plan2.Plan, phyPlan *models.PhyPlan, opts ...marshalPlanOptions) *marshalPlanHandler {
 	// TODO: need mem improvement
 	uuid := uuid.UUID(stmt.StatementID)
 	stmt.MarkResponseAt()
@@ -3357,6 +3413,9 @@ func NewMarshalPlanHandler(ctx context.Context, stmt *motrace.StatementInfo, pla
 	if h.needMarshalPlan() {
 		h.marshalPlan = explain.BuildJsonPlan(ctx, h.uuid, &explain.MarshalPlanOptions, h.query)
 		h.marshalPlan.NewPlanStats.SetWaitActiveCost(h.waitActiveCost)
+		if phyPlan != nil {
+			h.marshalPlan.PhyPlan = *phyPlan
+		}
 	}
 	return h
 }
@@ -3461,13 +3520,16 @@ func (h *marshalPlanHandler) Stats(ctx context.Context, ses FeSession) (statsByt
 	}
 	statsInfo := statistic.StatsInfoFromContext(ctx)
 	if statsInfo != nil {
-		val := int64(statsByte.GetTimeConsumed()) +
+		val := int64(statsByte.GetTimeConsumed()) + statsInfo.BuildReaderDuration +
 			int64(statsInfo.ParseDuration+
 				statsInfo.CompileDuration+
 				statsInfo.PlanDuration) - (statsInfo.IOAccessTimeConsumption + statsInfo.IOMergerTimeConsumption())
 		if val < 0 {
-			ses.Debugf(ctx, "issue#14926 negative cpu (%s) + statsInfo(%d + %d + %d - %d - %d) = %d",
+			ses.Infof(ctx, "negative cpu statement_id:%s, statement_type:%s, statsInfo(%d + %d + %d + %d + %d - %d - %d) = %d",
 				uuid.UUID(h.stmt.StatementID).String(),
+				h.stmt.StatementType,
+				int64(statsByte.GetTimeConsumed()),
+				statsInfo.BuildReaderDuration,
 				statsInfo.ParseDuration,
 				statsInfo.CompileDuration,
 				statsInfo.PlanDuration,

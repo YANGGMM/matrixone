@@ -121,6 +121,7 @@ func (l *LocalFS) AllocateCacheData(size int) fscache.Data {
 func (l *LocalFS) initCaches(ctx context.Context, config CacheConfig) error {
 	config.setDefaults()
 
+	// remote
 	if config.RemoteCacheEnabled {
 		if config.QueryClient == nil {
 			return moerr.NewInternalError(ctx, "query client is nil")
@@ -131,11 +132,14 @@ func (l *LocalFS) initCaches(ctx context.Context, config CacheConfig) error {
 		)
 	}
 
-	if *config.MemoryCapacity > DisableCacheCapacity { // 1 means disable
+	// memory
+	if config.MemoryCapacity != nil &&
+		*config.MemoryCapacity > DisableCacheCapacity { // 1 means disable
 		l.memCache = NewMemCache(
 			fscache.ConstCapacity(int64(*config.MemoryCapacity)),
 			&config.CacheCallbacks,
 			l.perfCounterSets,
+			l.name,
 		)
 		logutil.Info("fileservice: memory cache initialized",
 			zap.Any("fs-name", l.name),
@@ -143,25 +147,28 @@ func (l *LocalFS) initCaches(ctx context.Context, config CacheConfig) error {
 		)
 	}
 
-	if config.enableDiskCacheForLocalFS {
-		if *config.DiskCapacity > DisableCacheCapacity && config.DiskPath != nil {
-			var err error
-			l.diskCache, err = NewDiskCache(
-				ctx,
-				*config.DiskPath,
-				fscache.ConstCapacity(int64(*config.DiskCapacity)),
-				l.perfCounterSets,
-				true,
-				l,
-			)
-			if err != nil {
-				return err
-			}
-			logutil.Info("fileservice: disk cache initialized",
-				zap.Any("fs-name", l.name),
-				zap.Any("config", config),
-			)
+	// disk
+	if config.enableDiskCacheForLocalFS &&
+		config.DiskCapacity != nil &&
+		*config.DiskCapacity > DisableCacheCapacity &&
+		config.DiskPath != nil {
+		var err error
+		l.diskCache, err = NewDiskCache(
+			ctx,
+			*config.DiskPath,
+			fscache.ConstCapacity(int64(*config.DiskCapacity)),
+			l.perfCounterSets,
+			true,
+			l,
+			l.name,
+		)
+		if err != nil {
+			return err
 		}
+		logutil.Info("fileservice: disk cache initialized",
+			zap.Any("fs-name", l.name),
+			zap.Any("config", config),
+		)
 	}
 
 	return nil
@@ -350,23 +357,13 @@ read_memory_cache:
 		}()
 	}
 
-	startLock := time.Now()
-	done, wait := l.ioMerger.Merge(vector.ioMergeKey())
-	if done != nil {
-		stats.AddLocalFSReadIOMergerTimeConsumption(time.Since(startLock))
-		defer done()
-	} else {
-		wait()
-		stats.AddLocalFSReadIOMergerTimeConsumption(time.Since(startLock))
-		goto read_memory_cache
-	}
-
 	// Record diskIO and netwokIO(un memory IO) resource
 	ioStart := time.Now()
 	defer func() {
 		stats.AddIOAccessTimeConsumption(time.Since(ioStart))
 	}()
 
+read_disk_cache:
 	if l.diskCache != nil {
 
 		t0 := time.Now()
@@ -398,6 +395,26 @@ read_memory_cache:
 		}
 		if vector.allDone() {
 			return nil
+		}
+	}
+
+	mayReadMemoryCache := vector.Policy&SkipMemoryCacheReads == 0
+	mayReadDiskCache := vector.Policy&SkipDiskCacheReads == 0
+	if mayReadMemoryCache || mayReadDiskCache {
+		// may read caches, merge
+		startLock := time.Now()
+		done, wait := l.ioMerger.Merge(vector.ioMergeKey())
+		if done != nil {
+			stats.AddLocalFSReadIOMergerTimeConsumption(time.Since(startLock))
+			defer done()
+		} else {
+			wait()
+			stats.AddLocalFSReadIOMergerTimeConsumption(time.Since(startLock))
+			if mayReadMemoryCache {
+				goto read_memory_cache
+			} else {
+				goto read_disk_cache
+			}
 		}
 	}
 
@@ -1032,7 +1049,12 @@ func (l *LocalFS) Replace(ctx context.Context, vector IOVector) error {
 var _ CachingFileService = new(LocalFS)
 
 func (l *LocalFS) Close() {
-	l.FlushCache()
+	if l.memCache != nil {
+		l.memCache.Close()
+	}
+	if l.diskCache != nil {
+		l.diskCache.Close()
+	}
 }
 
 func (l *LocalFS) FlushCache() {

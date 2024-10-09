@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"reflect"
 
+	"go.uber.org/zap"
+
 	"github.com/matrixorigin/matrixone/pkg/catalog"
 	"github.com/matrixorigin/matrixone/pkg/clusterservice"
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
@@ -38,7 +40,6 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/util/executor"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/disttae/cache"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/disttae/logtailreplay"
-	"go.uber.org/zap"
 )
 
 func LinearSearchOffsetByValFactory(pk *vector.Vector) func(*vector.Vector) []int64 {
@@ -497,11 +498,10 @@ func (i *StatsBlkIter) Entry() objectio.BlockInfo {
 		i.curBlkRows = i.meta.GetBlockMeta(uint32(i.cur)).GetRows()
 	}
 
-	loc := objectio.BuildLocation(i.name, i.extent, i.curBlkRows, uint16(i.cur))
-	blk := objectio.BlockInfo{
-		BlockID: *objectio.BuildObjectBlockid(i.name, uint16(i.cur)),
-		MetaLoc: objectio.ObjectLocation(loc),
-	}
+	var blk objectio.BlockInfo
+	objectio.BuildLocationTo(i.name, i.extent, i.curBlkRows, uint16(i.cur), blk.MetaLoc[:])
+	objectio.BuildObjectBlockidTo(i.name, uint16(i.cur), blk.BlockID[:])
+
 	return blk
 }
 
@@ -709,23 +709,6 @@ func (e *concurrentExecutor) Run(ctx context.Context) {
 // GetConcurrency implements the ConcurrentExecutor interface.
 func (e *concurrentExecutor) GetConcurrency() int {
 	return e.concurrency
-}
-
-// removeIf removes the elements that pred is true.
-func removeIf[T any](data []T, pred func(t T) bool) []T {
-	if len(data) == 0 {
-		return data
-	}
-	res := 0
-	for i := 0; i < len(data); i++ {
-		if !pred(data[i]) {
-			if res != i {
-				data[res] = data[i]
-			}
-			res++
-		}
-	}
-	return data[:res]
 }
 
 func stringifySlice(req any, f func(any) string) string {

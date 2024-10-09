@@ -35,6 +35,8 @@ func NewArgument() *MergeGroup {
 func (mergeGroup *MergeGroup) Reset(
 	proc *process.Process, isPipelineFail bool, pipelineErr error) {
 
+	mergeGroup.ctr.itr = nil
+
 	if isPipelineFail {
 		mergeGroup.Free(proc, isPipelineFail, pipelineErr)
 		return
@@ -74,8 +76,9 @@ func (mergeGroup *MergeGroup) Reset(
 
 	// cannot reuse the projection.
 	if mergeGroup.ProjectList != nil {
-		anal := proc.GetAnalyze(mergeGroup.GetIdx(), mergeGroup.GetParallelIdx(), mergeGroup.GetParallelMajor())
-		anal.Alloc(mergeGroup.ProjectAllocSize)
+		if mergeGroup.OpAnalyzer != nil {
+			mergeGroup.OpAnalyzer.Alloc(mergeGroup.ProjectAllocSize)
+		}
 		mergeGroup.FreeProjection(proc)
 	}
 }

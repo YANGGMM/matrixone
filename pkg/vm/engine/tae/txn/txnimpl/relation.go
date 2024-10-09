@@ -164,8 +164,8 @@ func (h *txnRelation) Append(ctx context.Context, data *containers.Batch) error 
 	return h.Txn.GetStore().Append(ctx, h.table.entry.GetDB().ID, h.table.entry.GetID(), data)
 }
 
-func (h *txnRelation) AddObjsWithMetaLoc(ctx context.Context, stats containers.Vector) error {
-	return h.Txn.GetStore().AddObjsWithMetaLoc(
+func (h *txnRelation) AddDataFiles(ctx context.Context, stats containers.Vector) error {
+	return h.Txn.GetStore().AddDataFiles(
 		ctx,
 		h.table.entry.GetDB().ID,
 		h.table.entry.GetID(),
@@ -274,27 +274,14 @@ func (h *txnRelation) DeleteByFilter(ctx context.Context, filter *handle.Filter)
 	return h.RangeDelete(id, row, row, handle.DT_Normal)
 }
 
-func (h *txnRelation) DeleteByPhyAddrKeys(keys containers.Vector, pkVec containers.Vector) (err error) {
+func (h *txnRelation) DeleteByPhyAddrKeys(keys containers.Vector, pkVec containers.Vector, dt handle.DeleteType) (err error) {
 	id := h.table.entry.AsCommonID()
-	var row uint32
-	var pk containers.Vector
-	err = containers.ForeachVectorWindow(
-		keys, 0, keys.Length(),
-		func(rid types.Rowid, _ bool, offset int) (err error) {
-			id.BlockID, row = rid.Decode()
-			if pkVec != nil && pkVec.Length() > 0 {
-				pk = pkVec.Window(offset, 1)
-			}
-			err = h.Txn.GetStore().RangeDelete(
-				id,
-				row,
-				row,
-				pk,
-				handle.DT_Normal,
-			)
-			return
-		}, nil, nil)
-	return
+	return h.Txn.GetStore().DeleteByPhyAddrKeys(
+		id,
+		keys,
+		pkVec,
+		dt,
+	)
 }
 
 // Only used by test.
@@ -302,7 +289,7 @@ func (h *txnRelation) DeleteByPhyAddrKey(key any) error {
 	rid := key.(types.Rowid)
 	bid, row := rid.Decode()
 	id := h.table.entry.AsCommonID()
-	id.BlockID = bid
+	id.BlockID = *bid
 	schema := h.table.GetLocalSchema(false)
 	pkDef := schema.GetPrimaryKey()
 	pkVec := makeWorkspaceVector(pkDef.Type)
@@ -334,8 +321,8 @@ func (h *txnRelation) RangeDelete(id *common.ID, start, end uint32, dt handle.De
 //	return h.Txn.GetStore().TryDeleteByDeltaloc(id, deltaloc)
 //}
 
-func (h *txnRelation) TryDeleteByStats(id *common.ID, stats objectio.ObjectStats) (ok bool, err error) {
-	return h.Txn.GetStore().TryDeleteByStats(id, stats)
+func (h *txnRelation) AddPersistedTombstoneFile(id *common.ID, stats objectio.ObjectStats) (ok bool, err error) {
+	return h.Txn.GetStore().AddPersistedTombstoneFile(id, stats)
 }
 
 // Only used by test.
@@ -343,7 +330,7 @@ func (h *txnRelation) GetValueByPhyAddrKey(key any, col int) (any, bool, error) 
 	rid := key.(types.Rowid)
 	bid, row := rid.Decode()
 	id := h.table.entry.AsCommonID()
-	id.BlockID = bid
+	id.BlockID = *bid
 	return h.Txn.GetStore().GetValue(id, row, uint16(col), false)
 }
 
@@ -363,6 +350,6 @@ func (h *txnRelation) AlterTable(ctx context.Context, req *apipb.AlterTableReq) 
 	return h.table.AlterTable(ctx, req)
 }
 
-func (h *txnRelation) FillInWorkspaceDeletes(blkID types.Blockid, view **nulls.Nulls) error {
-	return h.table.FillInWorkspaceDeletes(blkID, view)
+func (h *txnRelation) FillInWorkspaceDeletes(blkID types.Blockid, view **nulls.Nulls, deleteStartOffset uint64) error {
+	return h.table.FillInWorkspaceDeletes(blkID, view, deleteStartOffset)
 }

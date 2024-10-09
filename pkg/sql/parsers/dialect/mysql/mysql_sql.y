@@ -219,6 +219,7 @@ import (
     accountRole *tree.Role
     showType tree.ShowType
     joinTableExpr *tree.JoinTableExpr
+    applyTableExpr *tree.ApplyTableExpr
 
     indexHintType tree.IndexHintType
     indexHintScope tree.IndexHintScope
@@ -278,7 +279,7 @@ import (
 %token <str> VALUES
 %token <str> NEXT VALUE SHARE MODE
 %token <str> SQL_NO_CACHE SQL_CACHE
-%left <str> JOIN STRAIGHT_JOIN LEFT RIGHT INNER OUTER CROSS NATURAL USE FORCE CROSS_L2
+%left <str> JOIN STRAIGHT_JOIN LEFT RIGHT INNER OUTER CROSS NATURAL USE FORCE CROSS_L2 APPLY
 %nonassoc LOWER_THAN_ON
 %nonassoc <str> ON USING
 %left <str> SUBQUERY_AS_EXPR
@@ -313,6 +314,7 @@ import (
 
 %token <str> OUT INOUT
 
+
 // Transaction
 %token <str> BEGIN START TRANSACTION COMMIT ROLLBACK WORK CONSISTENT SNAPSHOT
 %token <str> CHAIN NO RELEASE PRIORITY QUICK
@@ -332,7 +334,7 @@ import (
 %token <str> LOW_PRIORITY HIGH_PRIORITY DELAYED
 
 // Create Table
-%token <str> CREATE ALTER DROP RENAME ANALYZE ADD RETURNS
+%token <str> CREATE ALTER DROP RENAME ANALYZE PHYPLAN ADD RETURNS
 %token <str> SCHEMA TABLE SEQUENCE INDEX VIEW TO IGNORE IF PRIMARY COLUMN CONSTRAINT SPATIAL FULLTEXT FOREIGN KEY_BLOCK_SIZE
 %token <str> SHOW DESCRIBE EXPLAIN DATE ESCAPE REPAIR OPTIMIZE TRUNCATE
 %token <str> MAXVALUE PARTITION REORGANIZE LESS THAN PROCEDURE TRIGGER
@@ -486,7 +488,10 @@ import (
 %token <str> CDC
 
 // ROLLUP
-%token <str> ROLLUP
+%token <str> GROUPING SETS CUBE ROLLUP 
+
+// Logservice
+%token <str> LOGSERVICE REPLICAS STORES SETTINGS
 
 %type <statement> stmt block_stmt block_type_stmt normal_stmt
 %type <statements> stmt_list stmt_list_return
@@ -502,11 +507,11 @@ import (
 %type <statement> show_procedure_status_stmt show_function_status_stmt show_node_list_stmt show_locks_stmt
 %type <statement> show_table_num_stmt show_column_num_stmt show_table_values_stmt show_table_size_stmt
 %type <statement> show_variables_stmt show_status_stmt show_index_stmt
-%type <statement> show_servers_stmt show_connectors_stmt
+%type <statement> show_servers_stmt show_connectors_stmt show_logservice_replicas_stmt show_logservice_stores_stmt show_logservice_settings_stmt
 %type <statement> alter_account_stmt alter_user_stmt alter_view_stmt update_stmt use_stmt update_no_with_stmt alter_database_config_stmt alter_table_stmt rename_stmt
 %type <statement> transaction_stmt begin_stmt commit_stmt rollback_stmt
 %type <statement> explain_stmt explainable_stmt
-%type <statement> set_stmt set_variable_stmt set_password_stmt set_role_stmt set_default_role_stmt set_transaction_stmt set_connection_id_stmt
+%type <statement> set_stmt set_variable_stmt set_password_stmt set_role_stmt set_default_role_stmt set_transaction_stmt set_connection_id_stmt set_logservice_non_voting_replica_num
 %type <statement> lock_stmt lock_table_stmt unlock_table_stmt
 %type <statement> revoke_stmt grant_stmt
 %type <statement> load_data_stmt
@@ -522,7 +527,7 @@ import (
 %type <statement> kill_stmt
 %type <statement> backup_stmt snapshot_restore_stmt
 %type <statement> create_cdc_stmt show_cdc_stmt pause_cdc_stmt drop_cdc_stmt resume_cdc_stmt restart_cdc_stmt
-%type <rowsExprs> row_constructor_list
+%type <rowsExprs> row_constructor_list grouping_sets 
 %type <exprs>  row_constructor
 %type <exportParm> export_data_param_opt
 %type <loadParam> load_param_opt load_param_opt_2
@@ -557,8 +562,9 @@ import (
 %type <selectExprs> select_expression_list
 %type <selectExpr> select_expression
 %type <tableExprs> table_name_wild_list
-%type <joinTableExpr>  table_references join_table
-%type <tableExpr> into_table_name table_function table_factor table_reference escaped_table_reference
+%type <joinTableExpr>  join_table
+%type <applyTableExpr> apply_table
+%type <tableExpr> into_table_name table_function table_factor table_reference escaped_table_reference table_references
 %type <direction> asc_desc_opt
 %type <nullsPosition> nulls_first_last_opt
 %type <order> order
@@ -623,7 +629,7 @@ import (
 %type <aliasedTableExpr> aliased_table_name
 %type <unionTypeRecord> union_op
 %type <parenTableExpr> table_subquery
-%type <str> inner_join straight_join outer_join natural_join
+%type <str> inner_join straight_join outer_join natural_join apply_type
 %type <funcType> func_type_opt
 %type <funcExpr> function_call_generic
 %type <funcExpr> function_call_keyword
@@ -982,11 +988,11 @@ backup_timestamp_opt:
     }
 
 create_cdc_stmt:
-    CREATE CDC not_exists_opt STRING STRING STRING STRING STRING '{' create_cdc_opts '}'
+    CREATE CDC not_exists_opt ident STRING STRING STRING STRING '{' create_cdc_opts '}'
     {
         $$ = &tree.CreateCDC{
              		IfNotExists: $3,
-             		TaskName:    $4,
+             		TaskName:    tree.Identifier($4.Compare()),
              		SourceUri:   $5,
              		SinkType:    $6,
              		SinkUri:     $7,
@@ -1015,27 +1021,25 @@ create_cdc_opt:
     }
 
 show_cdc_stmt:
-    SHOW CDC STRING all_cdc_opt
+    SHOW CDC all_cdc_opt
     {
         $$ = &tree.ShowCDC{
-                    SourceUri:   $3,
-                    Option:      $4,
+                    Option:      $3,
         }
     }
 
 pause_cdc_stmt:
-    PAUSE CDC STRING all_cdc_opt
+    PAUSE CDC all_cdc_opt
     {
         $$ = &tree.PauseCDC{
-                    SourceUri:   $3,
-                    Option:      $4,
+                    Option:      $3,
         }
     }
 
 drop_cdc_stmt:
-    DROP CDC STRING all_cdc_opt
+    DROP CDC all_cdc_opt
     {
-        $$ = tree.NewDropCDC($3, $4)
+        $$ = tree.NewDropCDC($3)
     }
 
 all_cdc_opt:
@@ -1046,29 +1050,27 @@ all_cdc_opt:
                     TaskName: "",
         }
     }
-|   TASK STRING
+|   TASK ident
     {
         $$ = &tree.AllOrNotCDC{
             All: false,
-            TaskName: $2,
+            TaskName: tree.Identifier($2.Compare()),
         }
     }
 
 resume_cdc_stmt:
-    RESUME CDC STRING TASK STRING
+    RESUME CDC TASK ident
     {
         $$ = &tree.ResumeCDC{
-                    SourceUri:   $3,
-                    TaskName:    $5,
+                    TaskName:    tree.Identifier($4.Compare()),
         }
     }
 
 restart_cdc_stmt:
-    RESUME CDC STRING TASK STRING STRING
+    RESUME CDC TASK ident STRING
     {
         $$ = &tree.RestartCDC{
-                    SourceUri:   $3,
-                    TaskName:    $5,
+                    TaskName:    tree.Identifier($4.Compare()),
         }
     }
 
@@ -2298,6 +2300,16 @@ set_stmt:
 |   set_default_role_stmt
 |   set_transaction_stmt
 |   set_connection_id_stmt
+|   set_logservice_non_voting_replica_num
+
+set_logservice_non_voting_replica_num:
+  SET LOGSERVICE SETTINGS var_name equal_or_assignment set_expr
+  {
+    $$ = &tree.SetLogserviceSettings{
+      Name: $4,
+      Value: $6,
+    }
+  }
 
 set_transaction_stmt:
     SET TRANSACTION transaction_characteristic_list
@@ -3018,9 +3030,41 @@ explain_stmt:
         explainStmt.Options = options
         $$ = explainStmt
     }
+|   explain_sym PHYPLAN explainable_stmt
+    {
+        explainStmt := tree.NewExplainPhyPlan($3, "text")
+        optionElem := tree.MakeOptionElem("phyplan", "NULL")
+        options := tree.MakeOptions(optionElem)
+        explainStmt.Options = options
+        $$ = explainStmt
+    }
+|   explain_sym PHYPLAN VERBOSE explainable_stmt
+    {
+        explainStmt := tree.NewExplainPhyPlan($4, "text")
+        optionElem1 := tree.MakeOptionElem("phyplan", "NULL")
+        optionElem2 := tree.MakeOptionElem("verbose", "NULL")
+        options := tree.MakeOptions(optionElem1)
+        options = append(options, optionElem2)
+        explainStmt.Options = options
+        $$ = explainStmt
+    }
+|   explain_sym PHYPLAN ANALYZE explainable_stmt
+    {
+        explainStmt := tree.NewExplainPhyPlan($4, "text")
+        optionElem1 := tree.MakeOptionElem("phyplan", "NULL")
+        optionElem2 := tree.MakeOptionElem("analyze", "NULL")
+        options := tree.MakeOptions(optionElem1)
+        options = append(options, optionElem2)
+        explainStmt.Options = options
+        $$ = explainStmt
+    }
 |   explain_sym '(' utility_option_list ')' explainable_stmt
     {
-        if tree.IsContainAnalyze($3) {
+    	if tree.IsContainPhyPlan($3) {
+	    explainStmt := tree.NewExplainPhyPlan($5, "text")
+            explainStmt.Options = $3
+            $$ = explainStmt
+    	} else if tree.IsContainAnalyze($3) {
             explainStmt := tree.NewExplainAnalyze($5, "text")
             explainStmt.Options = $3
             $$ = explainStmt
@@ -3065,6 +3109,7 @@ explain_option_key:
     ANALYZE
 |   VERBOSE
 |   FORMAT
+|   PHYPLAN
 
 explain_foramt_value:
     JSON
@@ -3947,6 +3992,27 @@ show_stmt:
 |   show_snapshots_stmt
 |   show_pitr_stmt
 |   show_cdc_stmt
+|   show_logservice_replicas_stmt
+|   show_logservice_stores_stmt
+|   show_logservice_settings_stmt
+
+show_logservice_replicas_stmt:
+    SHOW LOGSERVICE REPLICAS
+    {
+        $$ = &tree.ShowLogserviceReplicas{}
+    }
+
+show_logservice_stores_stmt:
+    SHOW LOGSERVICE STORES
+    {
+        $$ = &tree.ShowLogserviceStores{}
+    }
+
+show_logservice_settings_stmt:
+    SHOW LOGSERVICE SETTINGS
+    {
+        $$ = &tree.ShowLogserviceSettings{}
+    }
 
 show_collation_stmt:
     SHOW COLLATION like_opt where_expression_opt
@@ -5612,10 +5678,50 @@ group_by_opt:
     }
 |   GROUP BY expression_list rollup_opt
     {
+        exprsList := []tree.Exprs{$3}
         $$ = &tree.GroupByClause{
-            GroupByExprs: $3,
-            RollUp:       $4,
+            GroupByExprsList: exprsList,
+            Apart: false,
+            Cube :      false,
+            Rollup:       $4,
         }
+    }
+|   GROUP BY GROUPING SETS '(' grouping_sets ')'
+    {
+        $$ = &tree.GroupByClause{
+            GroupByExprsList: $6,
+            Apart: false,
+            Cube :      false,
+            Rollup:       false,
+        }
+    }
+|   GROUP BY CUBE '('  expression_list ')'
+    {
+        $$ = &tree.GroupByClause{
+            GroupByExprsList: []tree.Exprs{$5},
+            Apart: false,
+            Cube :      true,
+            Rollup:       false,
+        }
+    }
+|   GROUP BY ROLLUP '(' expression_list ')'
+    {
+        $$ = &tree.GroupByClause{
+            GroupByExprsList: []tree.Exprs{$5},
+            Apart: false,
+            Cube :      false,
+            Rollup:       true,
+        }
+    }
+
+grouping_sets:
+    '(' expression_list_opt ')'
+    {
+        $$ = []tree.Exprs{$2}
+    }
+|   grouping_sets ',' '(' expression_list_opt ')'
+    {
+        $$ = append($1, $4)
     }
 
 rollup_opt:
@@ -5690,7 +5796,9 @@ table_references:
    	{
    		if t, ok := $1.(*tree.JoinTableExpr); ok {
    			$$ = t
-   		} else {
+   		} else if t, ok := $1.(*tree.ApplyTableExpr); ok {
+   			$$ = t
+        } else {
    			$$ = &tree.JoinTableExpr{Left: $1, Right: nil, JoinType: tree.JOIN_TYPE_CROSS}
    		}
     }
@@ -5708,6 +5816,10 @@ table_reference:
 	{
 		$$ = $1
 	}
+|   apply_table
+    {
+        $$ = $1
+    }
 
 join_table:
     table_reference inner_join table_factor join_condition_opt
@@ -5744,6 +5856,26 @@ join_table:
             JoinType: $2,
             Right: $3,
         }
+    }
+
+apply_table:
+    table_reference apply_type table_factor
+    {
+        $$ = &tree.ApplyTableExpr{
+            Left: $1,
+            ApplyType: $2,
+            Right: $3,
+        }
+    }
+
+apply_type:
+    CROSS APPLY
+    {
+        $$ = tree.APPLY_TYPE_CROSS
+    }
+|   OUTER APPLY
+    {
+        $$ = tree.APPLY_TYPE_OUTER
     }
 
 natural_join:
@@ -5787,6 +5919,7 @@ values_stmt:
             Limit: $4,
         }
     }
+
 
 row_constructor_list:
     row_constructor
@@ -10140,6 +10273,23 @@ function_call_aggregate:
             WindowSpec: $6,
         }
     }
+|   GROUPING '(' func_type_opt column_list ')' window_spec_opt
+    {
+        name := tree.NewUnresolvedColName($1)
+        var columnList tree.Exprs
+        for _, columnStr := range $4{
+            column := tree.NewUnresolvedColName(string(columnStr))
+            columnList = append(columnList, column)
+        }
+
+        $$ = &tree.FuncExpr{
+            Func: tree.FuncName2ResolvableFunctionReference(name),
+            FuncName: tree.NewCStr($1, 1),
+            Exprs: columnList,
+            Type: $3,
+            WindowSpec: $6,
+        }
+    }
 
 std_dev_pop:
     STD
@@ -12142,6 +12292,7 @@ non_reserved_keyword:
 |   LESS
 |   LEVEL
 |   LINESTRING
+|   LOGSERVICE
 |   LONGBLOB
 |   LONGTEXT
 |   LOCAL
@@ -12179,6 +12330,7 @@ non_reserved_keyword:
 |   POLYGON
 |   PROCEDURE
 |   PROXY
+|	PERIOD
 |   QUERY
 |   PAUSE
 |   PROFILES
@@ -12190,6 +12342,7 @@ non_reserved_keyword:
 |   REDUNDANT
 |   REPAIR
 |   REPEATABLE
+|   REPLICAS
 |   RELEASE
 |   RESUME
 |   REVOKE
@@ -12198,6 +12351,7 @@ non_reserved_keyword:
 |   ROLLBACK
 |   RESTRICT
 |   SESSION
+|   SETTINGS
 |   SERIALIZABLE
 |   SHARE
 |   SIGNED
@@ -12208,6 +12362,7 @@ non_reserved_keyword:
 |   START
 |   STATUS
 |   STORAGE
+|   STORES
 |   STATS_AUTO_RECALC
 |   STATS_PERSISTENT
 |   STATS_SAMPLE_PAGES
@@ -12407,6 +12562,10 @@ non_reserved_keyword:
 |	OWNERSHIP
 |   MO_TS
 |   ROLLUP
+|   GROUPING
+|   SETS
+|   CUBE
+
 
 func_not_keyword:
     DATE_ADD

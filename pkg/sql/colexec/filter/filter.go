@@ -18,15 +18,12 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/matrixorigin/matrixone/pkg/pb/plan"
-	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
-	"github.com/matrixorigin/matrixone/pkg/vm"
-
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
-
+	"github.com/matrixorigin/matrixone/pkg/pb/plan"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
+	"github.com/matrixorigin/matrixone/pkg/vm"
 	"github.com/matrixorigin/matrixone/pkg/vm/process"
 )
 
@@ -42,30 +39,25 @@ func (filter *Filter) OpType() vm.OpType {
 }
 
 func (filter *Filter) Prepare(proc *process.Process) (err error) {
-	if filter.exeExpr == nil && filter.E == nil {
-		return nil
-	}
-
-	var filterExpr *plan.Expr
-	if filter.exeExpr == nil {
-		filterExpr, err = plan2.ConstantFold(batch.EmptyForConstFoldBatch, plan2.DeepCopyExpr(filter.E), proc, true, true)
+	if filter.OpAnalyzer == nil {
+		filter.OpAnalyzer = process.NewAnalyzer(filter.GetIdx(), filter.IsFirst, filter.IsLast, "filter")
 	} else {
-		filterExpr, err = plan2.ConstantFold(batch.EmptyForConstFoldBatch, plan2.DeepCopyExpr(filter.exeExpr), proc, true, true)
+		filter.OpAnalyzer.Reset()
 	}
-	if err != nil {
-		return err
-	}
-	filter.ctr.executors, err = colexec.NewExpressionExecutorsFromPlanExpressions(proc, colexec.SplitAndExprs([]*plan.Expr{filterExpr}))
-	return err
 
-	// if len(filter.ctr.executors) == 0 {
-	// 	if filter.exeExpr == nil {
-	// 		filter.ctr.executors, err = colexec.NewExpressionExecutorsFromPlanExpressions(proc, colexec.SplitAndExprs([]*plan.Expr{filter.E}))
-	// 	} else {
-	// 		filter.ctr.executors, err = colexec.NewExpressionExecutorsFromPlanExpressions(proc, colexec.SplitAndExprs([]*plan.Expr{filter.exeExpr}))
-	// 	}
-	// }
-	// return err
+	if len(filter.ctr.executors) == 0 && filter.E != nil {
+		filter.ctr.executors, err = colexec.NewExpressionExecutorsFromPlanExpressions(proc, colexec.SplitAndExprs([]*plan.Expr{filter.E}))
+	}
+
+	if filter.ctr.allExecutors == nil {
+		filter.ctr.allExecutors = make([]colexec.ExpressionExecutor, 0, len(filter.ctr.runtimeExecutors)+len(filter.ctr.executors))
+	} else {
+		filter.ctr.allExecutors = filter.ctr.allExecutors[:0]
+	}
+	filter.ctr.allExecutors = append(filter.ctr.allExecutors, filter.ctr.runtimeExecutors...)
+	filter.ctr.allExecutors = append(filter.ctr.allExecutors, filter.ctr.executors...)
+
+	return err
 }
 
 func (filter *Filter) Call(proc *process.Process) (vm.CallResult, error) {
@@ -73,28 +65,27 @@ func (filter *Filter) Call(proc *process.Process) (vm.CallResult, error) {
 		return vm.CancelResult, err
 	}
 
-	anal := proc.GetAnalyze(filter.GetIdx(), filter.GetParallelIdx(), filter.GetParallelMajor())
-	anal.Start()
-	defer anal.Stop()
+	analyzer := filter.OpAnalyzer
+	analyzer.Start()
+	defer analyzer.Stop()
 
-	inputResult, err := vm.ChildrenCall(filter.GetChildren(0), proc, anal)
+	inputResult, err := vm.ChildrenCall(filter.GetChildren(0), proc, analyzer)
 	if err != nil {
 		return inputResult, err
 	}
-	anal.Input(inputResult.Batch, filter.IsFirst)
 
-	if inputResult.Batch == nil || inputResult.Batch.IsEmpty() || inputResult.Batch.Last() || len(filter.ctr.executors) == 0 {
+	if inputResult.Batch == nil || inputResult.Batch.IsEmpty() || inputResult.Batch.Last() || len(filter.ctr.allExecutors) == 0 {
 		return inputResult, nil
 	}
 
 	filterBat := inputResult.Batch
 	var sels []int64
-	for i := range filter.ctr.executors {
+	for i := range filter.ctr.allExecutors {
 		if filterBat.IsEmpty() {
 			break
 		}
 
-		vec, err := filter.ctr.executors[i].Eval(proc, []*batch.Batch{filterBat}, nil)
+		vec, err := filter.ctr.allExecutors[i].Eval(proc, []*batch.Batch{filterBat}, nil)
 		if err != nil {
 			return vm.CancelResult, err
 		}
@@ -102,7 +93,8 @@ func (filter *Filter) Call(proc *process.Process) (vm.CallResult, error) {
 		if proc.OperatorOutofMemory(int64(vec.Size())) {
 			return vm.CancelResult, moerr.NewOOM(proc.Ctx)
 		}
-		anal.Alloc(int64(vec.Size()))
+		analyzer.Alloc(int64(vec.Size()))
+
 		if !vec.GetType().IsBoolean() {
 			return vm.CancelResult, moerr.NewInvalidInput(proc.Ctx, "filter condition is not boolean")
 		}
@@ -159,9 +151,9 @@ func (filter *Filter) Call(proc *process.Process) (vm.CallResult, error) {
 	if filter.IsEnd {
 		result.Batch = nil
 	} else {
-		anal.Output(filterBat, filter.GetIsLast())
 		result.Batch = filterBat
 	}
+	analyzer.Output(result.Batch)
 	return result, nil
 }
 

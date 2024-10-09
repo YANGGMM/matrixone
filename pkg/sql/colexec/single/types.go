@@ -15,6 +15,7 @@
 package single
 
 import (
+	"github.com/matrixorigin/matrixone/pkg/common/hashmap"
 	"github.com/matrixorigin/matrixone/pkg/common/reuse"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
@@ -36,8 +37,8 @@ const (
 
 type container struct {
 	state int
-
-	rbat *batch.Batch
+	itr   hashmap.Iterator
+	rbat  *batch.Batch
 
 	expr colexec.ExpressionExecutor
 
@@ -102,19 +103,22 @@ func (singleJoin *SingleJoin) Release() {
 
 func (singleJoin *SingleJoin) Reset(proc *process.Process, pipelineFailed bool, err error) {
 	ctr := &singleJoin.ctr
-	anal := proc.GetAnalyze(singleJoin.GetIdx(), singleJoin.GetParallelIdx(), singleJoin.GetParallelMajor())
-
+	ctr.itr = nil
 	ctr.resetExecutor()
 	ctr.resetExprExecutor()
 	ctr.cleanHashMap()
 	ctr.state = Build
 
 	if singleJoin.ProjectList != nil {
-		anal.Alloc(singleJoin.ProjectAllocSize + singleJoin.ctr.maxAllocSize)
+		if singleJoin.OpAnalyzer != nil {
+			singleJoin.OpAnalyzer.Alloc(singleJoin.ProjectAllocSize + singleJoin.ctr.maxAllocSize)
+		}
 		singleJoin.ctr.maxAllocSize = 0
 		singleJoin.ResetProjection(proc)
 	} else {
-		anal.Alloc(singleJoin.ctr.maxAllocSize)
+		if singleJoin.OpAnalyzer != nil {
+			singleJoin.OpAnalyzer.Alloc(singleJoin.ctr.maxAllocSize)
+		}
 		singleJoin.ctr.maxAllocSize = 0
 	}
 }

@@ -15,12 +15,13 @@
 package frontend
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/fagongzi/goetty/v2/buf"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -37,6 +38,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
 	"github.com/matrixorigin/matrixone/pkg/sql/compile"
+	"github.com/matrixorigin/matrixone/pkg/sql/models"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect/mysql"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
@@ -176,6 +178,13 @@ const (
 	FPInternalExecutorExec
 	FPInternalExecutorQuery
 	FPHandleAnalyzeStmt
+	FPShowPublications
+	FPCreateCDC
+	FPPauseCDC
+	FPDropCDC
+	FPRestartCDC
+	FPResumeCDC
+	FPShowCDC
 )
 
 type (
@@ -205,7 +214,9 @@ type ComputationWrapper interface {
 
 	GetUUID() []byte
 
-	RecordExecPlan(ctx context.Context) error
+	RecordExecPlan(ctx context.Context, phyPlan *models.PhyPlan) error
+
+	SetExplainBuffer(buf *bytes.Buffer)
 
 	GetLoadTag() bool
 
@@ -359,7 +370,6 @@ func (prepareStmt *PrepareStmt) Close() {
 		prepareStmt.params.Free(prepareStmt.proc.Mp())
 	}
 	if prepareStmt.InsertBat != nil {
-		prepareStmt.InsertBat.SetCnt(1)
 		prepareStmt.InsertBat.Clean(prepareStmt.proc.Mp())
 		prepareStmt.InsertBat = nil
 	}
@@ -387,28 +397,42 @@ func (prepareStmt *PrepareStmt) Close() {
 	}
 }
 
-var _ buf.Allocator = &SessionAllocator{}
-
-type SessionAllocator struct {
-	allocator *malloc.ManagedAllocator
+type Allocator interface {
+	// Alloc allocate a []byte with len(data) >= size, and the returned []byte cannot
+	// be expanded in use.
+	Alloc(capacity int) ([]byte, error)
+	// Free the allocated memory
+	Free([]byte)
 }
 
-func NewSessionAllocator(pu *config.ParameterUnit) *SessionAllocator {
+var _ Allocator = &SessionAllocator{}
+
+type SessionAllocator struct {
+	allocator *malloc.ManagedAllocator[malloc.Allocator]
+}
+
+var baseSessionAllocator = sync.OnceValue(func() malloc.Allocator {
 	// default
 	allocator := malloc.GetDefault(nil)
+	// with metrics
+	allocator = malloc.NewMetricsAllocator(
+		allocator,
+		metric.MallocCounter.WithLabelValues("session-allocate"),
+		metric.MallocGauge.WithLabelValues("session-inuse"),
+		metric.MallocCounter.WithLabelValues("session-allocate-objects"),
+		metric.MallocGauge.WithLabelValues("session-inuse-objects"),
+	)
+	return allocator
+})
+
+func NewSessionAllocator(pu *config.ParameterUnit) *SessionAllocator {
+	// base
+	allocator := baseSessionAllocator()
 	// size bounded
 	allocator = malloc.NewSizeBoundedAllocator(
 		allocator,
 		uint64(pu.SV.GuestMmuLimitation),
 		nil,
-	)
-	// with metrics
-	allocator = malloc.NewMetricsAllocator(
-		allocator,
-		metric.MallocCounterSessionAllocateBytes,
-		metric.MallocGaugeSessionInuseBytes,
-		metric.MallocCounterSessionAllocateObjects,
-		metric.MallocGaugeSessionInuseObjects,
 	)
 	ret := &SessionAllocator{
 		// managed
@@ -685,9 +709,7 @@ func (ses *feSessionImpl) Close() {
 		ses.txnHandler = nil
 	}
 	if ses.txnCompileCtx != nil {
-		ses.txnCompileCtx.execCtx = nil
-		ses.txnCompileCtx.snapshot = nil
-		ses.txnCompileCtx.views = nil
+		ses.txnCompileCtx.Close()
 		ses.txnCompileCtx = nil
 	}
 	ses.sql = ""
@@ -1138,6 +1160,7 @@ type MysqlReader interface {
 	Property
 	Read() ([]byte, error)
 	ReadLoadLocalPacket() ([]byte, error)
+	FreeLoadLocal()
 	Free(buf []byte)
 	HandleHandshake(ctx context.Context, payload []byte) (bool, error)
 	Authenticate(ctx context.Context) error

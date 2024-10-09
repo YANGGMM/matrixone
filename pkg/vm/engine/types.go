@@ -583,6 +583,14 @@ const (
 	TombstoneData
 )
 
+type TombstoneCollectPolicy uint64
+
+const (
+	Policy_CollectUncommittedTombstones = 1 << iota
+	Policy_CollectCommittedTombstones
+	Policy_CollectAllTombstones = Policy_CollectUncommittedTombstones | Policy_CollectCommittedTombstones
+)
+
 type TombstoneApplyPolicy uint64
 
 const (
@@ -597,6 +605,7 @@ const (
 	Policy_CheckCommittedS3Only = Policy_SkipUncommitedInMemory | Policy_SkipCommittedInMemory | Policy_SkipUncommitedS3
 	Policy_CheckCommittedOnly   = Policy_SkipUncommitedInMemory | Policy_SkipUncommitedS3
 	Policy_CheckUnCommittedOnly = Policy_SkipCommittedInMemory | Policy_SkipCommittedS3
+	Policy_SkipAll              = Policy_SkipUncommitedInMemory | Policy_SkipCommittedInMemory | Policy_SkipUncommitedS3 | Policy_SkipCommittedS3
 )
 
 type Tombstoner interface {
@@ -608,7 +617,7 @@ type Tombstoner interface {
 	StringWithPrefix(string) string
 
 	// false positive check
-	HasBlockTombstone(ctx context.Context, id objectio.Blockid, fs fileservice.FileService) (bool, error)
+	HasBlockTombstone(ctx context.Context, id *objectio.Blockid, fs fileservice.FileService) (bool, error)
 
 	MarshalBinaryWithBuffer(w *bytes.Buffer) error
 	UnmarshalBinary(buf []byte) error
@@ -621,7 +630,7 @@ type Tombstoner interface {
 	// `deleted` is the rows that are deleted from this apply
 	// `left` is the rows that are left after this apply
 	ApplyInMemTombstones(
-		bid types.Blockid,
+		bid *types.Blockid,
 		rowsOffset []int64,
 		deleted *nulls.Nulls,
 	) (left []int64)
@@ -631,8 +640,8 @@ type Tombstoner interface {
 	ApplyPersistedTombstones(
 		ctx context.Context,
 		fs fileservice.FileService,
-		snapshot types.TS,
-		bid types.Blockid,
+		snapshot *types.TS,
+		bid *types.Blockid,
 		rowsOffset []int64,
 		deletedMask *nulls.Nulls,
 	) (left []int64, err error)
@@ -682,8 +691,8 @@ type RelData interface {
 	// for block info list
 	GetBlockInfoSlice() objectio.BlockInfoSlice
 	GetBlockInfo(i int) objectio.BlockInfo
-	SetBlockInfo(i int, blk objectio.BlockInfo)
-	AppendBlockInfo(blk objectio.BlockInfo)
+	SetBlockInfo(i int, blk *objectio.BlockInfo)
+	AppendBlockInfo(blk *objectio.BlockInfo)
 }
 
 // ForRangeShardID [begin, end)
@@ -728,6 +737,14 @@ const (
 	End
 )
 
+type DataSourceType uint8
+
+const (
+	GeneralLocalDataSource DataSourceType = iota
+	ShardingLocalDataSource
+	ShardingRemoteDataSource
+)
+
 type DataSource interface {
 	Next(
 		ctx context.Context,
@@ -741,13 +758,13 @@ type DataSource interface {
 
 	ApplyTombstones(
 		ctx context.Context,
-		bid objectio.Blockid,
+		bid *objectio.Blockid,
 		rowsOffset []int64,
 		applyPolicy TombstoneApplyPolicy,
 	) ([]int64, error)
 
 	GetTombstones(
-		ctx context.Context, bid objectio.Blockid,
+		ctx context.Context, bid *objectio.Blockid,
 	) (deletedRows *nulls.Nulls, err error)
 
 	SetOrderBy(orderby []*plan.OrderBySpec)
@@ -789,6 +806,7 @@ type ChangesHandle interface {
 	Next(ctx context.Context, mp *mpool.MPool) (data *batch.Batch, tombstone *batch.Batch, hint ChangesHandle_Hint, err error)
 	Close() error
 }
+
 type Relation interface {
 	Statistics
 
@@ -798,8 +816,10 @@ type Relation interface {
 	// third parameter: Transaction offset used to specify the starting position for reading data.
 	Ranges(context.Context, []*plan.Expr, int) (RelData, error)
 
-	CollectTombstones(ctx context.Context, txnOffset int) (Tombstoner, error)
+	CollectTombstones(ctx context.Context, txnOffset int, policy TombstoneCollectPolicy) (Tombstoner, error)
+
 	CollectChanges(ctx context.Context, from, to types.TS, mp *mpool.MPool) (ChangesHandle, error)
+
 	TableDefs(context.Context) ([]TableDef, error)
 
 	// Get complete tableDef information, including columns, constraints, partitions, version, comments, etc
@@ -846,12 +866,25 @@ type Relation interface {
 		policy TombstoneApplyPolicy,
 	) ([]Reader, error)
 
+	BuildShardingReaders(
+		ctx context.Context,
+		proc any,
+		expr *plan.Expr,
+		relData RelData,
+		num int,
+		txnOffset int,
+		orderBy bool,
+		policy TombstoneApplyPolicy,
+	) ([]Reader, error)
+
 	TableColumns(ctx context.Context) ([]*Attribute, error)
 
 	//max and min values
 	MaxAndMinValues(ctx context.Context) ([][2]any, []uint8, error)
 
 	GetEngineType() EngineType
+
+	GetProcess() any
 
 	GetColumMetadataScanInfo(ctx context.Context, name string) ([]*plan.MetadataScanInfo, error)
 
@@ -871,6 +904,7 @@ type Reader interface {
 	SetOrderBy([]*plan.OrderBySpec)
 	GetOrderBy() []*plan.OrderBySpec
 	SetFilterZM(objectio.ZoneMap)
+	//SetScanType()
 }
 
 type Database interface {
@@ -946,6 +980,8 @@ type Engine interface {
 	GetMessageCenter() any
 
 	GetService() string
+
+	LatestLogtailAppliedTime() timestamp.Timestamp
 }
 
 type VectorPool interface {
@@ -1001,11 +1037,11 @@ func (rd *EmptyRelationData) GetBlockInfo(i int) objectio.BlockInfo {
 	panic("not supported")
 }
 
-func (rd *EmptyRelationData) SetBlockInfo(i int, blk objectio.BlockInfo) {
+func (rd *EmptyRelationData) SetBlockInfo(i int, blk *objectio.BlockInfo) {
 	panic("not supported")
 }
 
-func (rd *EmptyRelationData) AppendBlockInfo(blk objectio.BlockInfo) {
+func (rd *EmptyRelationData) AppendBlockInfo(blk *objectio.BlockInfo) {
 	panic("not supported")
 }
 

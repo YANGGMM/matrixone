@@ -36,7 +36,7 @@ type HashPageTable = TransferTable[*TransferHashPage]
 
 var (
 	ttl      = 5 * time.Second
-	diskTTL  = 3 * time.Minute
+	diskTTL  = 5 * time.Minute
 	ttlLatch sync.RWMutex
 )
 
@@ -160,7 +160,6 @@ func (page *TransferHashPage) Clear() {
 		return
 	}
 	page.hashmap.Store(nil)
-	clear(*m)
 	v2.TaskMergeTransferPageLengthGauge.Sub(float64(len(*m)))
 }
 

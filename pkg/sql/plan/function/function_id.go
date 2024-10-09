@@ -80,6 +80,8 @@ const (
 	ATAN
 	ATAN2
 	AVG
+	AVG_TW_CACHE
+	AVG_TW_RESULT
 	BASE64_DECODE
 	BASE64_ENCODE
 	BIT_AND
@@ -116,6 +118,7 @@ const (
 	TIMEDIFF
 	TIMESTAMPDIFF
 	DENSE_RANK
+	MO_WIN_DIVISOR
 	EMPTY
 	ENDSWITH
 	EXP
@@ -123,7 +126,7 @@ const (
 	FIRST_VALUE
 	FLOOR
 	GREATEST
-	GROUPING_ID
+	GROUPING
 	HASH
 	HASH_AGG
 	HEX_DECODE
@@ -251,6 +254,7 @@ const (
 	APPROX_COUNT_DISTINCT
 
 	LOAD_FILE
+	SAVE_FILE
 
 	//information functions
 	//Reference to : https://dev.mysql.com/doc/refman/8.0/en/information-functions.html
@@ -304,6 +308,7 @@ const (
 	ADD_FAULT_POINT     // Add a fault point
 	REMOVE_FAULT_POINT  // Remove
 	TRIGGER_FAULT_POINT // Trigger.
+	MO_WIN_TRUNCATE
 
 	MO_MEMORY_USAGE // Dump memory usage
 	MO_ENABLE_MEMORY_USAGE_DETAIL
@@ -315,6 +320,7 @@ const (
 
 	MO_SHOW_VISIBLE_BIN      // parse type/onUpdate/default []byte to visible string
 	MO_SHOW_VISIBLE_BIN_ENUM //  parse type/onUpdate/default []byte to visible string for enum
+	MO_SHOW_COL_UNIQUE       // show column whether unique key
 
 	MO_TABLE_ROWS    // table rows
 	MO_TABLE_SIZE    // table size
@@ -327,6 +333,7 @@ const (
 	MO_ADMIN_NAME // get mo admin name of account
 	MO_CU
 	MO_CU_V1
+	MO_EXPLAIN_PHY
 
 	GIT_VERSION
 	BUILD_VERSION
@@ -453,7 +460,10 @@ var functionIdRegister = map[string]int32{
 	"min":                   MIN,
 	"sum":                   SUM,
 	"group_concat":          GROUP_CONCAT,
+	"grouping":              GROUPING,
 	"avg":                   AVG,
+	"avg_tw_cache":          AVG_TW_CACHE,
+	"avg_tw_result":         AVG_TW_RESULT,
 	"count":                 COUNT,
 	"starcount":             STARCOUNT,
 	"bit_or":                BIT_OR,
@@ -593,11 +603,14 @@ var functionIdRegister = map[string]int32{
 	"enable_fault_injection":         ENABLE_FAULT_INJECTION,
 	"disable_fault_injection":        DISABLE_FAULT_INJECTION,
 	"dense_rank":                     DENSE_RANK,
+	"mo_win_divisor":                 MO_WIN_DIVISOR,
 	"add_fault_point":                ADD_FAULT_POINT,
 	"remove_fault_point":             REMOVE_FAULT_POINT,
 	"trigger_fault_point":            TRIGGER_FAULT_POINT,
+	"mo_win_truncate":                MO_WIN_TRUNCATE,
 	"uuid":                           UUID,
 	"load_file":                      LOAD_FILE,
+	"save_file":                      SAVE_FILE,
 	"hex":                            HEX,
 	"unhex":                          UNHEX,
 	"md5":                            MD5,
@@ -626,6 +639,7 @@ var functionIdRegister = map[string]int32{
 	"mo_ctl":                         MO_CTL,
 	"mo_show_visible_bin":            MO_SHOW_VISIBLE_BIN,
 	"mo_show_visible_bin_enum":       MO_SHOW_VISIBLE_BIN_ENUM,
+	"mo_show_col_unique":             MO_SHOW_COL_UNIQUE,
 	"substring_index":                SUBSTRING_INDEX,
 	"field":                          FIELD,
 	"format":                         FORMAT,
@@ -649,6 +663,7 @@ var functionIdRegister = map[string]int32{
 	"mo_admin_name":                  MO_ADMIN_NAME,
 	"mo_cu":                          MO_CU,
 	"mo_cu_v1":                       MO_CU_V1,
+	"mo_explain_phy":                 MO_EXPLAIN_PHY,
 	"git_version":                    GIT_VERSION,
 	"build_version":                  BUILD_VERSION,
 	"values":                         VALUES,
