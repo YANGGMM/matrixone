@@ -8,9 +8,11 @@ select +9999999999999999999,-9999999999999999999;
 9999999999999999999	-9999999999999999999
 9999999999999999999	-9999999999999999999
 select cast(9223372036854775808 as unsigned)+1;
-Data truncation: data out of range: data type int64, value '9223372036854775808'
+cast(9223372036854775808 as unsigned) + 1
+9223372036854775809
 select 9223372036854775808+1;
-Data truncation: data out of range: data type int64, value '9223372036854775808'
+9223372036854775808 + 1
+9223372036854775809
 select -(0-3),round(-(0-3)), round(9999999999999999999);
 -(0 - 3)	round(-(0 - 3))	round(9999999999999999999)
 3	3	9999999999999999999
@@ -72,9 +74,11 @@ a	big
 1	18446744073709551613
 1	18446744073709551614
 select min(big),max(big),max(big)-1 from t1;
-Data truncation: data out of range: data type int64, value '18446744073709551615'
+min(big)    max(big)    max(big) - 1
+0    18446744073709551615    18446744073709551614
 select min(big),max(big),max(big)-1 from t1 group by a;
-Data truncation: data out of range: data type int64, value '18446744073709551615'
+min(big)    max(big)    max(big) - 1
+0    18446744073709551615    18446744073709551614
 drop table t1;
 create table t1 (id bigint primary key, a int);
 insert into t1 values (1,1);
@@ -133,7 +137,8 @@ bigint_col
 17666000000000000000
 drop table t1;
 select cast(10000002383263201056 as unsigned) mod 50 as result;
-Data truncation: data out of range: data type int64, value '10000002383263201056'
+result
+6
 select cast(19999999999999999999 as signed);
 Data truncation: data out of range: data type int64, value '19999999999999999999'
 select cast(-19999999999999999999 as signed);
@@ -513,7 +518,7 @@ select * from t1;
 a
 18446744073709551613
 18446744073709551614
-select * from t1 where a -1 > 1;
+select * from t1 where a - 1 > 1;
 a
 18446744073709551613
 18446744073709551614

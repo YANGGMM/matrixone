@@ -271,7 +271,7 @@ create table t1 (a bigint unsigned);
 insert into t1 values (0xFFFFFFFFFFFFFFFD);
 insert into t1 values (0xFFFFFFFFFFFFFFFE);
 select * from t1;
-select * from t1 where a -1 > 1;
+select * from t1 where a - 1 > 1;
 select * from t1 where a > 1;
 select * from t1 where a + 1 > 1;
 select a + 1 from t1;
