@@ -1423,6 +1423,9 @@ func BindFuncExprImplByPlanExpr(ctx context.Context, name string, args []*Expr) 
 		} else if args[0].Typ.Id == int32(types.T_varchar) && args[1].Typ.Id == int32(types.T_varchar) {
 			name = "concat"
 		}
+		// if unsigned int64 plus int64, cast int64 to uint64
+		// or if int64 plus unsigned int64, cast int64 to uint64
+
 		if err != nil {
 			return nil, err
 		}
