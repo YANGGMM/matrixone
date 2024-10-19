@@ -501,6 +501,10 @@ func (client *txnClient) openTxn(op *txnOperator) error {
 				return moerr.NewInternalErrorNoCtx("cn service is not ready, retry later")
 			}
 
+			if op.opts.options.WaitPausedDisabled() {
+				return moerr.NewInvalidStateNoCtx("txn client is in pause state")
+			}
+
 			client.logger.Warn("txn client is in pause state, wait for it to be ready",
 				zap.String("txn ID", hex.EncodeToString(op.reset.txnID)))
 			// Wait until the txn client's state changed to normal, and it will probably take
@@ -612,7 +616,7 @@ func (client *txnClient) Resume() {
 // NodeRunningPipelineManager to avoid packages import cycles.
 type NodeRunningPipelineManager interface {
 	PauseService()
-	KillAllQueriesWithError(err error)
+	KillAllQueriesWithError()
 	ResumeService()
 }
 
@@ -638,10 +642,9 @@ func (client *txnClient) AbortAllRunningTxn() {
 		// the newer timestamp from logtail consumer.
 		client.timestampWaiter.Pause()
 	}
-	runningPipelines.KillAllQueriesWithError(nil)
+	runningPipelines.KillAllQueriesWithError()
 
 	client.mu.Unlock()
-	runningPipelines.ResumeService()
 
 	for _, op := range ops {
 		op.reset.cannotCleanWorkspace = true
@@ -654,6 +657,7 @@ func (client *txnClient) AbortAllRunningTxn() {
 		op.reset.cannotCleanWorkspace = false
 		op.notifyActive()
 	}
+	runningPipelines.ResumeService()
 
 	if client.timestampWaiter != nil {
 		// After rollback all transactions, resume the timestamp waiter channel.

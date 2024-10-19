@@ -22,9 +22,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/prashantv/gostub"
-	"github.com/stretchr/testify/assert"
-
+	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/common/mpool"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
@@ -34,6 +32,8 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	"github.com/matrixorigin/matrixone/pkg/txn/client"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine"
+	"github.com/prashantv/gostub"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestNewTableReader(t *testing.T) {
@@ -157,7 +157,6 @@ func Test_tableReader_Run(t *testing.T) {
 
 	mp := mpool.MustNewZero()
 
-	//
 	stub6 := gostub.Stub(&CollectChanges,
 		func(ctx context.Context, rel engine.Relation, fromTs, toTs types.TS, mp *mpool.MPool) (engine.ChangesHandle, error) {
 			return newTestChangesHandle("test", "t1", 20, 23, types.TS{}, mp, packer),
@@ -217,6 +216,53 @@ func Test_tableReader_Run(t *testing.T) {
 			reader.Run(tt.args.ctx, tt.args.ar)
 		})
 	}
+}
+
+func Test_tableReader_Run_StaleRead(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+
+	stub := gostub.Stub(&GetTxnOp,
+		func(_ context.Context, _ engine.Engine, _ client.TxnClient, _ string) (client.TxnOperator, error) {
+			return nil, moerr.NewErrStaleReadNoCtx("", "")
+		})
+	defer stub.Reset()
+
+	// restart success
+	reader := &tableReader{
+		tick:        time.NewTicker(time.Millisecond * 300),
+		sinker:      NewConsoleSinker(nil, nil),
+		restartFunc: func(*DbTableInfo) error { return nil },
+	}
+	reader.Run(ctx, NewCdcActiveRoutine())
+	cancel()
+
+	// restart failed
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	reader = &tableReader{
+		tick:        time.NewTicker(time.Millisecond * 300),
+		sinker:      NewConsoleSinker(nil, nil),
+		restartFunc: func(*DbTableInfo) error { return moerr.NewInternalErrorNoCtx("") },
+	}
+	reader.Run(ctx, NewCdcActiveRoutine())
+	cancel()
+}
+
+func Test_tableReader_Run_NonStaleReadErr(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	stub := gostub.Stub(&GetTxnOp,
+		func(_ context.Context, _ engine.Engine, _ client.TxnClient, _ string) (client.TxnOperator, error) {
+			return nil, moerr.NewInternalErrorNoCtx("")
+		})
+	defer stub.Reset()
+
+	reader := &tableReader{
+		tick:        time.NewTicker(time.Millisecond * 300),
+		sinker:      NewConsoleSinker(nil, nil),
+		restartFunc: func(*DbTableInfo) error { return nil },
+	}
+	reader.Run(ctx, NewCdcActiveRoutine())
 }
 
 //func Test_tableReader_readTable(t *testing.T) {
@@ -413,7 +459,7 @@ func allocTestBatch(
 	batchSize int,
 	mp *mpool.MPool,
 ) *batch.Batch {
-	batchData := batch.New(true, attrName)
+	batchData := batch.New(attrName)
 
 	//alloc space for vector
 	for i := 0; i < len(attrName); i++ {

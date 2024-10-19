@@ -112,7 +112,7 @@ func (tcc *TxnCompilerContext) SetSnapshot(snapshot *plan2.Snapshot) {
 }
 
 func (tcc *TxnCompilerContext) InitExecuteStmtParam(execPlan *plan.Execute) (*plan.Plan, tree.Statement, error) {
-	_, p, st, _, err := initExecuteStmtParam(tcc.execCtx.reqCtx, tcc.execCtx.ses.(*Session), tcc.tcw.(*TxnComputationWrapper), execPlan)
+	_, p, st, _, err := initExecuteStmtParam(tcc.execCtx.reqCtx, tcc.execCtx.ses.(*Session), tcc.tcw.(*TxnComputationWrapper), execPlan, "")
 	return p, st, err
 }
 
@@ -248,7 +248,7 @@ func (tcc *TxnCompilerContext) GetDatabaseId(dbName string, snapshot *plan2.Snap
 	return databaseId, nil
 }
 
-func (tcc *TxnCompilerContext) GetDbLevelConfig(dbName string, varName string) (string, error) {
+func (tcc *TxnCompilerContext) GetConfig(varName string, dbName string, tblName string) (string, error) {
 	switch varName {
 	case "unique_check_on_autoincr":
 		// check if the database is a system database
@@ -257,7 +257,7 @@ func (tcc *TxnCompilerContext) GetDbLevelConfig(dbName string, varName string) (
 			if _, ok := ses.(*backSession); ok {
 				return "None", nil
 			}
-			ret, err := ses.GetConfig(tcc.GetContext(), dbName, varName)
+			ret, err := ses.GetConfig(tcc.GetContext(), varName, dbName, tblName)
 			if err != nil {
 				return "", err
 			}
@@ -906,6 +906,13 @@ func (tcc *TxnCompilerContext) statsInCache(ctx context.Context, dbName string, 
 	if s == nil {
 		return nil, false
 	}
+
+	second := int64(time.Now().Second())
+	if s.ApproxObjectNumber != 0 && second-s.TimeSecond < s.ApproxObjectNumber {
+		// do not call ApproxObjectsNum within a short time limit
+		return s, false
+	}
+	s.TimeSecond = second
 
 	var partitionInfo *plan2.PartitionByDef
 	engineDefs, err := table.TableDefs(ctx)

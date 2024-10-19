@@ -54,6 +54,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/disttae/logtailreplay"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/engine_util"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/blockio"
+	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/containers"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/index"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/mergesort"
 	"github.com/matrixorigin/matrixone/pkg/vm/process"
@@ -560,12 +561,14 @@ func (tbl *txnTable) CollectTombstones(
 func (tbl *txnTable) Ranges(
 	ctx context.Context,
 	exprs []*plan.Expr,
+	preAllocSize int,
 	txnOffset int,
 ) (data engine.RelData, err error) {
 	unCommittedObjs, _ := tbl.collectUnCommittedDataObjs(txnOffset)
 	return tbl.doRanges(
 		ctx,
 		exprs,
+		preAllocSize,
 		unCommittedObjs,
 	)
 }
@@ -573,13 +576,14 @@ func (tbl *txnTable) Ranges(
 func (tbl *txnTable) doRanges(
 	ctx context.Context,
 	exprs []*plan.Expr,
+	preAllocSize int,
 	uncommittedObjects []objectio.ObjectStats,
 ) (data engine.RelData, err error) {
 	sid := tbl.proc.Load().GetService()
 	start := time.Now()
 	seq := tbl.db.op.NextSequence()
 
-	blocks := objectio.MakeBlockInfoSlice(1)
+	blocks := objectio.PreAllocBlockInfoSlice(1, preAllocSize)
 
 	trace.GetService(sid).AddTxnDurationAction(
 		tbl.db.op,
@@ -672,11 +676,9 @@ func (tbl *txnTable) doRanges(
 		return
 	}
 
-	data = &engine_util.BlockListRelData{}
-	for i := range blocks.Len() {
-		data.AppendBlockInfo(blocks.Get(i))
-	}
-
+	blklist := &engine_util.BlockListRelData{}
+	blklist.SetBlockList(blocks)
+	data = blklist
 	return
 }
 
@@ -994,7 +996,7 @@ func (tbl *txnTable) TableDefs(ctx context.Context) ([]engine.TableDef, error) {
 	}
 	for i, def := range tbl.defs {
 		if attr, ok := def.(*engine.AttributeDef); ok {
-			if attr.Attr.Name != catalog.Row_ID {
+			if !objectio.IsPhysicalAddr(attr.Attr.Name) {
 				defs = append(defs, tbl.defs[i])
 			}
 		}
@@ -1062,7 +1064,7 @@ func (tbl *txnTable) GetTableDef(ctx context.Context) *plan.TableDef {
 						Name: name,
 					}
 				}
-				if attr.Attr.Name == catalog.Row_ID {
+				if objectio.IsPhysicalAddr(attr.Attr.Name) {
 					hasRowId = true
 				}
 				i++
@@ -1400,7 +1402,7 @@ func (tbl *txnTable) GetHideKeys(ctx context.Context) ([]*engine.Attribute, erro
 	attrs = append(attrs, &engine.Attribute{
 		IsHidden: true,
 		IsRowId:  true,
-		Name:     catalog.Row_ID,
+		Name:     objectio.PhysicalAddr_Attr,
 		Type:     types.New(types.T_Rowid, 0, 0),
 		Primary:  true,
 	})
@@ -1560,7 +1562,7 @@ func (tbl *txnTable) Delete(
 		return moerr.NewInternalErrorNoCtx("delete operation is not allowed in snapshot transaction")
 	}
 	//for S3 delete
-	if name != catalog.Row_ID {
+	if !objectio.IsPhysicalAddr(name) {
 		return tbl.EnhanceDelete(bat, name)
 	}
 	bat = tbl.getTxn().deleteBatch(bat, tbl.db.databaseId, tbl.tableId)
@@ -1755,7 +1757,6 @@ func (tbl *txnTable) BuildReaders(
 		}
 	}
 
-	scanType := determineScanType(relData, newNum)
 	def := tbl.GetTableDef(ctx)
 	mod := blkCnt % newNum
 	divide := blkCnt / newNum
@@ -1787,7 +1788,6 @@ func (tbl *txnTable) BuildReaders(
 			return nil, err
 		}
 
-		rd.SetScanType(scanType)
 		rds = append(rds, rd)
 	}
 	return rds, nil
@@ -1974,10 +1974,10 @@ func (tbl *txnTable) PKPersistedBetween(
 	}
 
 	buildUnsortedFilter := func() objectio.ReadFilterSearchFuncType {
-		return getNonSortedPKSearchFuncByPKVec(keys)
+		return LinearSearchOffsetByValFactory(keys)
 	}
 
-	cacheBat := batch.EmptyBatchWithSize(1)
+	cacheVectors := containers.NewVectors(1)
 	//read block ,check if keys exist in the block.
 	pkDef := tbl.tableDef.Cols[tbl.primaryIdx]
 	pkSeq := pkDef.Seqnum
@@ -1989,7 +1989,7 @@ func (tbl *txnTable) PKPersistedBetween(
 			[]types.Type{pkType},
 			fs,
 			blk.MetaLocation(),
-			&cacheBat,
+			cacheVectors,
 			tbl.proc.Load().GetMPool(),
 			fileservice.Policy(0),
 		)
@@ -2002,7 +2002,7 @@ func (tbl *txnTable) PKPersistedBetween(
 			searchFunc = buildUnsortedFilter()
 		}
 
-		sels := searchFunc(cacheBat.Vecs)
+		sels := searchFunc(&cacheVectors[0])
 		release()
 		if len(sels) > 0 {
 			return true, nil
@@ -2022,14 +2022,14 @@ func (tbl *txnTable) PrimaryKeysMayBeModified(
 		return false,
 			moerr.NewInternalErrorNoCtx("primary key modification is not allowed in snapshot transaction")
 	}
-	part, err := tbl.getTxn().engine.LazyLoadLatestCkp(ctx, tbl)
+	part, err := tbl.eng.(*Engine).LazyLoadLatestCkp(ctx, tbl)
 	if err != nil {
 		return false, err
 	}
 
 	snap := part.Snapshot()
 	var packer *types.Packer
-	put := tbl.getTxn().engine.packerPool.Get(&packer)
+	put := tbl.eng.(*Engine).packerPool.Get(&packer)
 	defer put.Put()
 	packer.Reset()
 
@@ -2237,7 +2237,7 @@ func writeTransferMapsToS3(ctx context.Context, taskHost *cnMergeTask) (err erro
 	columns := []string{"src_blk", "src_row", "dest_obj", "dest_blk", "dest_row"}
 	colTypes := []types.T{types.T_int32, types.T_uint32, types.T_uint8, types.T_uint16, types.T_uint32}
 	batchSize := min(200*mpool.MB/len(columns)/int(unsafe.Sizeof(int32(0))), totalRows)
-	buffer := batch.New(true, columns)
+	buffer := batch.New(columns)
 	releases := make([]func(), len(columns))
 	for i := range columns {
 		t := colTypes[i].ToType()

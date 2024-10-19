@@ -24,6 +24,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
 	"github.com/matrixorigin/matrixone/pkg/defines"
 	"github.com/matrixorigin/matrixone/pkg/lockservice"
+	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	"github.com/matrixorigin/matrixone/pkg/txn/client"
 	"github.com/matrixorigin/matrixone/pkg/txn/trace"
 	"github.com/matrixorigin/matrixone/pkg/util/executor"
@@ -73,7 +74,7 @@ func (s *sqlStore) Create(
 	if txnOp != nil {
 		opts = opts.WithDisableIncrStatement()
 	} else {
-		opts = opts.WithEnableTrace()
+		opts = opts.WithEnableTrace().WithDisableWaitPaused()
 	}
 
 	return s.exec.ExecTxn(
@@ -97,7 +98,7 @@ func (s *sqlStore) Allocate(
 	colName string,
 	count int,
 	txnOp client.TxnOperator,
-) (uint64, uint64, error) {
+) (uint64, uint64, timestamp.Timestamp, error) {
 	var current, next, step uint64
 	ok := false
 
@@ -112,7 +113,7 @@ func (s *sqlStore) Allocate(
 	if txnOp != nil {
 		opts = opts.WithDisableIncrStatement()
 	} else {
-		opts = opts.WithEnableTrace()
+		opts = opts.WithEnableTrace().WithDisableWaitPaused()
 	}
 
 	ctxDone := func() bool {
@@ -214,7 +215,7 @@ func (s *sqlStore) Allocate(
 				continue
 			}
 
-			return 0, 0, err
+			return 0, 0, timestamp.Timestamp{}, err
 		}
 		if ok {
 			break
@@ -222,7 +223,8 @@ func (s *sqlStore) Allocate(
 	}
 
 	from, to := getNextRange(current, next, int(step))
-	return from, to, nil
+	commitTs := txnOp.GetOverview().Meta.CommitTS
+	return from, to, commitTs, nil
 }
 
 func (s *sqlStore) UpdateMinValue(
@@ -239,8 +241,10 @@ func (s *sqlStore) UpdateMinValue(
 	// So updateMinValue will use a new txn to update the min value. To avoid w-w conflict, we need to wait this
 	// committed log tail applied to ensure subsequence txn must get a snapshot ts which is large than this commit.
 	if txnOp == nil {
-		opts = opts.WithWaitCommittedLogApplied().
-			WithEnableTrace()
+		opts = opts.
+			WithWaitCommittedLogApplied().
+			WithEnableTrace().
+			WithDisableWaitPaused()
 	} else {
 		opts = opts.WithDisableIncrStatement()
 	}
@@ -264,6 +268,7 @@ func (s *sqlStore) Delete(ctx context.Context, tableID uint64) error {
 	opts := executor.Options{}.
 		WithDatabase(database).
 		WithEnableTrace().
+		WithDisableWaitPaused().
 		WithWaitCommittedLogApplied()
 
 	return s.exec.ExecTxn(ctx,
@@ -314,7 +319,7 @@ func (s *sqlStore) GetColumns(
 	if txnOp != nil {
 		opts = opts.WithDisableIncrStatement()
 	} else {
-		opts = opts.WithEnableTrace()
+		opts = opts.WithEnableTrace().WithDisableWaitPaused()
 	}
 
 	res, err := s.exec.Exec(ctx, fetchSQL, opts)

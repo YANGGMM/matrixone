@@ -148,7 +148,7 @@ func (external *External) Prepare(proc *process.Process) error {
 		}
 	}
 	if external.ctr.buf == nil {
-		external.ctr.buf = batch.New(false, param.Attrs)
+		external.ctr.buf = batch.New(param.Attrs)
 		var flag bool
 		if param.Extern.Format == tree.PARQUET {
 			flag = false
@@ -485,13 +485,13 @@ func getTailSizeStrict(param *tree.ExternParam, cols []*plan.ColDef, r io.ReadCl
 	csvReader, err := newReaderWithParam(&ExternalParam{
 		ExParamConst: ExParamConst{Extern: param},
 		ExParam:      ExParam{reader: io.NopCloser(bufR)},
-	}, true)
+	})
 	if err != nil {
 		return 0, err
 	}
 	var fields []csvparser.Field
 	for {
-		fields, err = csvReader.Read()
+		fields, err = csvReader.Read(fields)
 		if err != nil {
 			return 0, err
 		}
@@ -940,7 +940,7 @@ func getMOCSVReader(param *ExternalParam, proc *process.Process) (*ParseLineHand
 		return nil, err
 	}
 
-	csvReader, err := newReaderWithParam(param, false)
+	csvReader, err := newReaderWithParam(param)
 	if err != nil {
 		return nil, err
 	}
@@ -1779,7 +1779,7 @@ func readCountStringLimitSize(r *csvparser.CSVParser, ctx context.Context, size 
 			return i, true, nil
 		default:
 		}
-		record, err := r.Read()
+		record, err := r.Read(records[i])
 		if err != nil {
 			if err == io.EOF {
 				return i, true, nil

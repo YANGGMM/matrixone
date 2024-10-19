@@ -152,13 +152,10 @@ func (rt *Routine) getConnectionID() uint32 {
 	return rt.getProtocol().GetU32(CONNID)
 }
 
-func (rt *Routine) updateGoroutineId() {
+func (rt *Routine) getGoroutineId() uint64 {
 	if rt.goroutineID == 0 {
 		rt.goroutineID = GetRoutineId()
 	}
-}
-
-func (rt *Routine) getGoroutineId() uint64 {
 	return rt.goroutineID
 }
 
@@ -266,10 +263,8 @@ func (rt *Routine) handleRequest(req *Request) error {
 	//all offspring related to the request inherit the txnCtx
 	cancelRequestCtx, cancelRequestFunc := context.WithTimeout(ses.GetTxnHandler().GetTxnCtx(), parameters.SessionTimeout.Duration)
 	rt.setCancelRequestFunc(cancelRequestFunc)
-	ses.ResetFPrints()
 	ses.EnterFPrint(FPHandleRequest)
 	defer ses.ExitFPrint(FPHandleRequest)
-	defer ses.ResetFPrints()
 
 	if rt.needPrintSessionInfo() {
 		ses.Info(routineCtx, "mo received first request")
@@ -523,6 +518,7 @@ func NewRoutine(ctx context.Context, protocol MysqlRrWr, parameters *config.Fron
 		parameters:        parameters,
 		printInfoOnce:     true,
 		mc:                newMigrateController(),
+		goroutineID:       GetRoutineId(),
 	}
 	protocol.UpdateCtx(cancelRoutineCtx)
 

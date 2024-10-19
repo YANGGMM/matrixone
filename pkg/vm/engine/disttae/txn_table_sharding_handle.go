@@ -21,18 +21,19 @@ import (
 	"sync"
 	"time"
 
-	"github.com/matrixorigin/matrixone/pkg/catalog"
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/common/morpc"
 	"github.com/matrixorigin/matrixone/pkg/container/batch"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/container/vector"
+	"github.com/matrixorigin/matrixone/pkg/logutil"
 	"github.com/matrixorigin/matrixone/pkg/objectio"
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
 	"github.com/matrixorigin/matrixone/pkg/pb/shard"
 	"github.com/matrixorigin/matrixone/pkg/pb/timestamp"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/engine_util"
+	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/common"
 	"github.com/matrixorigin/matrixone/pkg/vm/engine/tae/gc"
 	"github.com/matrixorigin/matrixone/pkg/vm/process"
 )
@@ -51,7 +52,7 @@ func (sr *shardingRemoteReader) updateCols(cols []string, tblDef *plan.TableDef)
 		sr.colTypes = make([]types.Type, len(cols))
 		for i, column := range cols {
 			column = strings.ToLower(column)
-			if column == catalog.Row_ID {
+			if objectio.IsPhysicalAddr(column) {
 				sr.colTypes[i] = objectio.RowidType
 			} else {
 				colIdx := tblDef.Name2ColIndex[column]
@@ -227,6 +228,7 @@ func HandleShardingReadRanges(
 	ranges, err := tbl.doRanges(
 		ctx,
 		param.RangesParam.Exprs,
+		2,
 		nil,
 	)
 	if err != nil {
@@ -349,6 +351,14 @@ func HandleShardingReadNext(
 	}
 	bat := buildBatch()
 	defer func() {
+		//TODO::add for debug #19202, remove it later.
+		logutil.Infof("xxxx HandleShardingReadNext, stream:%s, txn:%s,name:%s,id:%d, bat:%s",
+			streamID.String(),
+			tbl.db.op.Txn().DebugString(),
+			tbl.tableDef.Name,
+			tbl.tableId,
+			common.MoBatchToString(bat, 10))
+
 		bat.Clean(mp)
 	}()
 
