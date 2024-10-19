@@ -288,3 +288,15 @@ select * from t1 where a > 1;
 select * from t1 where 1 + a > 1;
 select 1 + a from t1;
 drop table t1;
+
+drop table if exists t2;
+create table t2 (a bigint unsigned, b int);
+insert into t2 values (0xFFFFFFFFFFFFFFFA, -1);
+insert into t2 values (0xFFFFFFFFFFFFFFFB, -2);
+insert into t2 values (0xFFFFFFFFFFFFFFFD, 1);
+insert into t2 values (0xFFFFFFFFFFFFFFFE, 2);
+select a + b from t2;
+select a - b from t2;
+select * from t2 where a - 1 > 1;
+select * from t2 where 1 + a > 1;
+drop table t2;
