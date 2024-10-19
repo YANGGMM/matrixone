@@ -1443,26 +1443,6 @@ func BindFuncExprImplByPlanExpr(ctx context.Context, name string, args []*Expr) 
 		} else if args[0].Typ.Id == int32(types.T_varchar) && args[1].Typ.Id == int32(types.T_varchar) {
 			name = "concat"
 		}
-		// if unsigned int64 plus int64, cast int64 to uint64
-		// or if int64 plus unsigned int64, cast int64 to uint64
-		if args[0].Typ.Id == int32(types.T_uint64) && args[1].Typ.Id == int32(types.T_int64) {
-			args[1], err = appendCastBeforeExpr(ctx, args[1], plan.Type{
-				Id:          int32(types.T_uint64),
-				NotNullable: args[1].Typ.NotNullable,
-			})
-			if err != nil {
-				return nil, err
-			}
-		} else if args[0].Typ.Id == int32(types.T_int64) && args[1].Typ.Id == int32(types.T_uint64) {
-			args[0], err = appendCastBeforeExpr(ctx, args[0], plan.Type{
-				Id:          int32(types.T_uint64),
-				NotNullable: args[0].Typ.NotNullable,
-			})
-			if err != nil {
-				return nil, err
-			}
-		}
-
 		if err != nil {
 			return nil, err
 		}
@@ -1489,16 +1469,6 @@ func BindFuncExprImplByPlanExpr(ctx context.Context, name string, args []*Expr) 
 		} else if args[0].Typ.Id == int32(types.T_varchar) && args[1].Typ.Id == int32(types.T_interval) {
 			name = "date_sub"
 			args, err = resetDateFunctionArgs(ctx, args[0], args[1])
-		}
-		// if unsigned int64 minus int64, cast int64 to uint64
-		if args[0].Typ.Id == int32(types.T_uint64) && args[1].Typ.Id == int32(types.T_int64) {
-			args[1], err = appendCastBeforeExpr(ctx, args[1], plan.Type{
-				Id:          int32(types.T_uint64),
-				NotNullable: args[1].Typ.NotNullable,
-			})
-			if err != nil {
-				return nil, err
-			}
 		}
 		if err != nil {
 			return nil, err

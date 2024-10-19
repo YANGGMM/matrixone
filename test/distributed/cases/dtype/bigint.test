@@ -294,7 +294,7 @@ create table t2 (a bigint unsigned, b int);
 insert into t2 values (0xFFFFFFFFFFFFFFFA, -1);
 insert into t2 values (0xFFFFFFFFFFFFFFFB, -2);
 insert into t2 values (0xFFFFFFFFFFFFFFFD, 1);
-insert into t2 values (0xFFFFFFFFFFFFFFFE, 2);
+insert into t2 values (0xFFFFFFFFFFFFFFFC, 2);
 select a + b from t2;
 select a - b from t2;
 select * from t2 where a - 1 > 1;
