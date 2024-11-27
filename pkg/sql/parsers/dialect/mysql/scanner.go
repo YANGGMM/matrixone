@@ -141,9 +141,21 @@ func (s *Scanner) Scan() (int, string) {
 				return strTyp, strStr
 			}
 
-		} else {
-			return s.scanIdentifier(false)
 		}
+		if ch == '_' {
+			// "_utf8mb4'xxxx'"
+			// return 'xxxx'
+
+			if s.peek(1) == 'u' && s.peek(2) == 't' && s.peek(3) == 'f' && s.peek(4) == '8' && s.peek(5) == 'm' && s.peek(6) == 'b' && s.peek(7) == '4' {
+				if !s.readCollate() {
+					return LEX_ERROR, ""
+				}
+				return s.scanString('\'', STRING)
+			}
+		}
+
+		return s.scanIdentifier(false)
+
 	case isDigit(ch):
 		return s.scanNumber()
 	case ch == ':':
@@ -300,6 +312,42 @@ func (s *Scanner) readVersion() bool {
 		}
 	}
 	return true
+}
+
+func (s *Scanner) readCollate() bool {
+	if s.Pos < len(s.buf) {
+		if s.cur() == '_' {
+			s.inc()
+			if s.cur() == 'u' {
+				s.inc()
+				if s.cur() == 't' {
+					s.inc()
+					if s.cur() == 'f' {
+						s.inc()
+						if s.cur() == '8' {
+							s.inc()
+							if s.cur() == 'm' {
+								s.inc()
+								if s.cur() == 'b' {
+									s.inc()
+									if s.cur() == '4' {
+										s.inc()
+										// if has empty space, skip
+										s.skipBlank()
+										if s.cur() == '\'' {
+											s.inc()
+											return true
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (s *Scanner) stepBackOneChar(ch uint16) (int, string) {
