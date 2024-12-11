@@ -1482,29 +1482,29 @@ func getCreateTableSql(ctx context.Context, bh BackgroundExec, snapshotName stri
 	return colsList[0][0], nil
 }
 
-func getAccountIdByTs(ctx context.Context, bh BackgroundExec, snapshotTs int64) (uint32, error) {
-	ctx = defines.AttachAccountId(ctx, catalog.System_Account)
-	sql := fmt.Sprintf("select account_id from mo_catalog.mo_snapshots where ts = %d", snapshotTs)
-	bh.ClearExecResultSet()
-	if err := bh.Exec(ctx, sql); err != nil {
-		return 0, err
-	}
+// func getAccountIdByTs(ctx context.Context, bh BackgroundExec, snapshotTs int64) (uint32, error) {
+// 	ctx = defines.AttachAccountId(ctx, catalog.System_Account)
+// 	sql := fmt.Sprintf("select account_id from mo_catalog.mo_snapshots where ts = %d", snapshotTs)
+// 	bh.ClearExecResultSet()
+// 	if err := bh.Exec(ctx, sql); err != nil {
+// 		return 0, err
+// 	}
 
-	erArray, err := getResultSet(ctx, bh)
-	if err != nil {
-		return 0, err
-	}
+// 	erArray, err := getResultSet(ctx, bh)
+// 	if err != nil {
+// 		return 0, err
+// 	}
 
-	if execResultArrayHasData(erArray) {
-		var accountId int64
-		if accountId, err = erArray[0].GetInt64(ctx, 0, 0); err != nil {
-			return 0, err
-		}
-		return uint32(accountId), nil
-	}
+// 	if execResultArrayHasData(erArray) {
+// 		var accountId int64
+// 		if accountId, err = erArray[0].GetInt64(ctx, 0, 0); err != nil {
+// 			return 0, err
+// 		}
+// 		return uint32(accountId), nil
+// 	}
 
-	return 0, moerr.NewInternalErrorf(ctx, "no such snapshot, snapshot ts: %v", snapshotTs)
-}
+// 	return 0, moerr.NewInternalErrorf(ctx, "no such snapshot, snapshot ts: %v", snapshotTs)
+// }
 
 func getAccountId(ctx context.Context, bh BackgroundExec, accountName string) (uint32, error) {
 	ctx = defines.AttachAccountId(ctx, catalog.System_Account)
