@@ -17,11 +17,13 @@ package frontend
 import (
 	"context"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 
 	"github.com/matrixorigin/matrixone/pkg/catalog"
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
@@ -188,21 +190,56 @@ func doCreateSnapshot(ctx context.Context, ses *Session, stmt *tree.CreateSnapSh
 		return err
 	}
 
-	// 2.only sys can create cluster level snapshot
 	tenantInfo := ses.GetTenantInfo()
 	currentAccount := tenantInfo.GetTenant()
 	snapshotLevel = stmt.Object.SLevel.Level
-	if snapshotLevel == tree.SNAPSHOTLEVELCLUSTER && currentAccount != sysAccountName {
-		return moerr.NewInternalError(ctx, "only sys tenant can create cluster level snapshot")
+
+	// 1.check create snapshot priv
+	err = doCheckCreateSnapshotPriv(ctx, ses, stmt)
+	if err != nil {
+		return err
 	}
 
-	// 3.only sys can create tenant level snapshot for other tenant
-	if snapshotLevel == tree.SNAPSHOTLEVELACCOUNT {
-		snapshotForAccount = string(stmt.Object.ObjName)
-		if currentAccount != sysAccountName && currentAccount != snapshotForAccount {
-			return moerr.NewInternalError(ctx, "only sys tenant can create tenant level snapshot for other tenant")
+	// 2. check snapshot exists or not
+	snapshotName = string(stmt.Name)
+	snapshotExist, err = checkSnapShotExistOrNot(ctx, bh, snapshotName)
+	if err != nil {
+		return err
+	}
+	if snapshotExist {
+		if !stmt.IfNotExists {
+			return moerr.NewInternalErrorf(ctx, "snapshot %s already exists", snapshotName)
+		} else {
+			return nil
 		}
+	}
 
+	// 3.1 generate snapshot id
+	newUUid, err := uuid.NewV7()
+	if err != nil {
+		return err
+	}
+	snapshotId = newUUid.String()
+
+	// 3. get database name , table name  and objId according to the snapshot level
+	switch snapshotLevel {
+	case tree.SNAPSHOTLEVELCLUSTER:
+		sql, err = getSqlForCreateSnapshot(
+			ctx,
+			snapshotId,
+			snapshotName,
+			time.Now().UTC().UnixNano(),
+			snapshotLevel.String(),
+			"",
+			"",
+			"",
+			math.MaxUint64,
+		)
+		if err != nil {
+			return err
+		}
+	case tree.SNAPSHOTLEVELACCOUNT:
+		snapshotForAccount = string(stmt.Object.ObjName)
 		// check account exists or not and get accountId
 		getAccountIdFunc := func(accountName string) (accountId uint64, rtnErr error) {
 			var erArray []ExecResult
@@ -244,48 +281,165 @@ func doCreateSnapshot(ctx context.Context, ses *Session, stmt *tree.CreateSnapSh
 		} else {
 			objId = uint64(tenantInfo.GetTenantID())
 		}
+
+		sql, err = getSqlForCreateSnapshot(
+			ctx,
+			snapshotId,
+			snapshotName,
+			time.Now().UTC().UnixNano(),
+			snapshotLevel.String(),
+			snapshotForAccount,
+			"",
+			"",
+			objId,
+		)
+		if err != nil {
+			return err
+		}
+	case tree.SNAPSHOTLEVELDATABASE:
+		databaseName = string(stmt.Object.ObjName)
+		if len(databaseName) > 0 && needSkipDb(databaseName) {
+			return moerr.NewInternalError(ctx, fmt.Sprintf("can not create snapshot for current database %s", databaseName))
+		}
+
+		getDatabaseIdFunc := func(dbName string) (dbId uint64, rtnErr error) {
+			var erArray []ExecResult
+			sql, rtnErr = getSqlForCheckDatabase(ctx, dbName)
+			if rtnErr != nil {
+				return 0, rtnErr
+			}
+			bh.ClearExecResultSet()
+			rtnErr = bh.Exec(ctx, sql)
+			if rtnErr != nil {
+				return 0, rtnErr
+			}
+
+			erArray, rtnErr = getResultSet(ctx, bh)
+			if rtnErr != nil {
+				return 0, rtnErr
+			}
+
+			if execResultArrayHasData(erArray) {
+				for i := uint64(0); i < erArray[0].GetRowCount(); i++ {
+					dbId, rtnErr = erArray[0].GetUint64(ctx, i, 0)
+					if rtnErr != nil {
+						return 0, rtnErr
+					}
+				}
+			} else {
+				return 0, moerr.NewInternalErrorf(ctx, "database %s does not exist", dbName)
+			}
+			return dbId, rtnErr
+		}
+		objId, err = getDatabaseIdFunc(databaseName)
+		if err != nil {
+			return err
+		}
+
+		sql, err = getSqlForCreateSnapshot(
+			ctx,
+			snapshotId,
+			snapshotName,
+			time.Now().UTC().UnixNano(),
+			snapshotLevel.String(),
+			currentAccount,
+			databaseName,
+			"",
+			objId,
+		)
+		if err != nil {
+			return err
+		}
+
+	case tree.SNAPSHOTLEVELTABLE:
+		objectName := string(stmt.Object.ObjName)
+		objects := strings.Split(objectName, ".")
+		if len(objects) != 2 {
+			return moerr.NewInternalError(ctx, fmt.Sprintf("invalid table name %s", objectName))
+		}
+		databaseName = objects[0]
+		tableName = objects[1]
+		if len(databaseName) > 0 && needSkipDb(databaseName) {
+			return moerr.NewInternalError(ctx, fmt.Sprintf("can not create pitr for current table %s.%s", databaseName, tableName))
+		}
+
+		getTableIdFunc := func(dbName, tblName string) (tblId uint64, rtnErr error) {
+			var erArray []ExecResult
+			sql, rtnErr = getSqlForCheckDatabaseTable(ctx, dbName, tblName)
+			if rtnErr != nil {
+				return 0, rtnErr
+			}
+			bh.ClearExecResultSet()
+			rtnErr = bh.Exec(ctx, sql)
+			if rtnErr != nil {
+				return 0, rtnErr
+			}
+
+			erArray, rtnErr = getResultSet(ctx, bh)
+			if rtnErr != nil {
+				return 0, rtnErr
+			}
+
+			if execResultArrayHasData(erArray) {
+				for i := uint64(0); i < erArray[0].GetRowCount(); i++ {
+					tblId, rtnErr = erArray[0].GetUint64(ctx, i, 0)
+					if rtnErr != nil {
+						return 0, rtnErr
+					}
+				}
+			} else {
+				return 0, moerr.NewInternalErrorf(ctx, "table %s.%s does not exist", dbName, tblName)
+			}
+			return tblId, rtnErr
+		}
+		objId, err = getTableIdFunc(databaseName, tableName)
+		if err != nil {
+			return err
+		}
+
+		sql, err = getSqlForCreateSnapshot(
+			ctx,
+			snapshotId,
+			snapshotName,
+			time.Now().UTC().UnixNano(),
+			snapshotLevel.String(),
+			currentAccount,
+			databaseName,
+			tableName,
+			objId,
+		)
+		if err != nil {
+			return err
+		}
 	}
 
-	// check snapshot exists or not
-	snapshotName = string(stmt.Name)
-	snapshotExist, err = checkSnapShotExistOrNot(ctx, bh, snapshotName)
+	getLogger(ses.GetService()).Info("create pitr", zap.String("sql", sql))
+	err = bh.Exec(ctx, sql)
 	if err != nil {
 		return err
 	}
-	if snapshotExist {
-		if !stmt.IfNotExists {
-			return moerr.NewInternalErrorf(ctx, "snapshot %s already exists", snapshotName)
-		} else {
-			return nil
+
+	getLogger(ses.GetService()).Info(fmt.Sprintf("create snapshot %s success", snapshotName))
+	return err
+}
+
+func doCheckCreateSnapshotPriv(ctx context.Context, ses *Session, stmt *tree.CreateSnapShot) error {
+	var err error
+	snapshotLevel := stmt.Object.SLevel.Level
+	tenantInfo := ses.GetTenantInfo()
+	currentAccount := tenantInfo.GetTenant()
+
+	switch snapshotLevel {
+	case tree.SNAPSHOTLEVELCLUSTER:
+		if currentAccount != sysAccountName {
+			return moerr.NewInternalError(ctx, "only sys tenant can create cluster level snapshot")
 		}
-	} else {
-		// insert record to the system table
-
-		// 1. get snapshot id
-		newUUid, err := uuid.NewV7()
-		if err != nil {
-			return err
-		}
-		snapshotId = newUUid.String()
-
-		// 2. get snapshot ts
-		// ts := ses.proc.TxnOperator.SnapshotTS()
-		// snapshotTs = ts.String()
-
-		sql, err = getSqlForCreateSnapshot(ctx, snapshotId, snapshotName, time.Now().UTC().UnixNano(), snapshotLevel.String(), string(stmt.Object.ObjName), databaseName, tableName, objId)
-		if err != nil {
-			return err
-		}
-
-		err = bh.Exec(ctx, sql)
-		if err != nil {
-			return err
+	case tree.SNAPSHOTLEVELACCOUNT:
+		snapshotForAccount := string(stmt.Object.ObjName)
+		if currentAccount != sysAccountName && currentAccount != snapshotForAccount {
+			return moerr.NewInternalError(ctx, "only sys tenant can create tenant level snapshot for other tenant")
 		}
 	}
-	getLogger(ses.GetService()).Info(fmt.Sprintf("create snapshot %s success", snapshotName))
-
-	// insert record to the system table
-
 	return err
 }
 
@@ -515,6 +669,9 @@ func checkRestorePriv(ctx context.Context, ses *Session, snapshot *snapshotRecor
 				return moerr.NewInternalError(ctx, "non-sys account's snapshot can't restore to sys account")
 			}
 		}
+		if snapshot.level == tree.RESTORELEVELDATABASE.String() || snapshot.level == tree.RESTORELEVELTABLE.String() {
+			return moerr.NewInternalError(ctx, "can't restore account from db or table level snapshot")
+		}
 	case tree.RESTORELEVELDATABASE:
 		dbname := string(stmt.DatabaseName)
 		if len(dbname) > 0 && needSkipDb(dbname) {
@@ -524,6 +681,15 @@ func checkRestorePriv(ctx context.Context, ses *Session, snapshot *snapshotRecor
 		if snapshot.level == tree.RESTORELEVELCLUSTER.String() {
 			return moerr.NewInternalError(ctx, "can't restore db from cluster level snapshot")
 		}
+		if snapshot.level == tree.RESTORELEVELTABLE.String() {
+			return moerr.NewInternalError(ctx, "can't restore db from table level snapshot")
+		}
+		if string(stmt.AccountName) != ses.GetTenantInfo().GetTenant() {
+			return moerr.NewInternalError(ctx, "can't restore table from other account's snapshot")
+		}
+		if snapshot.level == tree.RESTORELEVELDATABASE.String() && snapshot.databaseName != string(stmt.DatabaseName) {
+			return moerr.NewInternalErrorf(ctx, "databaseName(%v) does not match snapshot.databaseName(%v)", string(stmt.DatabaseName), snapshot.databaseName)
+		}
 	case tree.RESTORELEVELTABLE:
 		dbname := string(stmt.DatabaseName)
 		if len(dbname) > 0 && needSkipDb(dbname) {
@@ -531,6 +697,14 @@ func checkRestorePriv(ctx context.Context, ses *Session, snapshot *snapshotRecor
 		}
 		if snapshot.level == tree.RESTORELEVELCLUSTER.String() {
 			return moerr.NewInternalError(ctx, "can't restore db from cluster level snapshot")
+		}
+		if string(stmt.AccountName) != ses.GetTenantInfo().GetTenant() {
+			return moerr.NewInternalError(ctx, "can't restore table from other account's snapshot")
+		}
+		if snapshot.level == tree.RESTORELEVELTABLE.String() {
+			if snapshot.databaseName != string(stmt.DatabaseName) || snapshot.tableName != string(stmt.TableName) {
+				return moerr.NewInternalErrorf(ctx, "tableName(%v) does not match snapshot.tableName(%v)", string(stmt.TableName), snapshot.tableName)
+			}
 		}
 	default:
 		return moerr.NewInternalErrorf(ctx, "unknown restore level: %v", restoreLevel)
@@ -1319,7 +1493,14 @@ func doResolveSnapshotWithSnapshotName(ctx context.Context, ses FeSession, snaps
 	var accountId uint32
 	// cluster level record has no accountName, so accountId is 0
 	if len(record.accountName) != 0 {
-		accountId = uint32(record.objId)
+		if record.level == tree.RESTORELEVELACCOUNT.String() {
+			accountId = uint32(record.objId)
+		} else {
+			accountId, err = defines.GetAccountId(ctx)
+			if err != nil {
+				return
+			}
+		}
 	}
 
 	return &pbplan.Snapshot{
